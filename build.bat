@@ -15,7 +15,7 @@ if exist .git (
     if exist ".githooks" (
         echo Installing Git hooks...
         for %%F in (.githooks\*) do (
-            copy /Y "%%F" ".git\hooks\%%~nxF" >nul
+            copy /Y "%%F" ".git\hooks\%%~nF" >nul
         )
     )
 )
