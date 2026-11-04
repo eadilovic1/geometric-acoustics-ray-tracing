@@ -1,0 +1,5 @@
+# Global code owners for this repository.
+# With "Require review from Code Owners" enabled in GitHub branch protection rules,
+# only the specified owners can approve Pull Requests before merging to protected branches.
+
+* @eadilovic1
