@@ -3,6 +3,7 @@
 #include "core/Transform.h"
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <cstdint>
 
 class MeshBuffer;
 class ShaderProgram;
@@ -61,6 +62,10 @@ struct RenderItem {
     PrimitiveTopology topology  = PrimitiveTopology::Triangles;
     DrawMode          drawMode  = DrawMode::Fill;
     RenderFlags       flags;
+
+    /// Optional acoustic material override (index in AcousticMaterialLibrary).
+    /// If 0 (Default), acoustic extraction can infer from MaterialInstance name or use default.
+    uint32_t          acousticMaterialId = 0;
 
     /// Returns whichever shader will actually be used at draw time.
     [[nodiscard]] const ShaderProgram* ResolvedShader() const;

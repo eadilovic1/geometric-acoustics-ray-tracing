@@ -60,6 +60,11 @@ public:
     /// scroll area (always visible — no scrolling needed to reach it).
     virtual void OnTerrainTabFooter() {}
 
+    /// Returns read-only scene objects (for physics, culling, and acoustic extraction).
+    [[nodiscard]] size_t GetObjectCount() const { return m_objects.size(); }
+    [[nodiscard]] const RenderItem &GetObject(size_t index) const { return m_objects[index]; }
+    [[nodiscard]] const std::vector<RenderItem> &GetObjects() const { return m_objects; }
+
 protected:
     /// Replaces the scene camera.
     void SetCamera(Camera camera);
