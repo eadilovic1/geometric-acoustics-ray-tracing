@@ -52,6 +52,9 @@ struct Mesh::Impl {
     uint32_t             indexCount  = 0;
     std::string          name;
 
+    std::vector<VertexPNT> cpuVertices;
+    std::vector<uint32_t>  cpuIndices;
+
     Impl(const MeshData& data, GLenum usage)
         : vbo(Buffer::VERTEX,
               data.vertices.data(),
@@ -66,6 +69,8 @@ struct Mesh::Impl {
         , vertexCount(data.VertexCount())
         , indexCount(data.IndexCount())
         , name(data.name)
+        , cpuVertices(data.vertices)
+        , cpuIndices(data.indices)
     {
         submeshBounds.reserve(submeshes.size());
         for (const SubMesh& subMesh : submeshes)
@@ -232,4 +237,18 @@ AABB Mesh::GetSubMeshBounds(uint32_t index) const {
     if (!m_impl || index >= m_impl->submeshBounds.size())
         return AABB::Empty();
     return m_impl->submeshBounds[index];
+}
+
+const std::vector<VertexPNT>& Mesh::GetCpuVertices() const {
+    static const std::vector<VertexPNT> s_empty;
+    return m_impl ? m_impl->cpuVertices : s_empty;
+}
+
+const std::vector<uint32_t>& Mesh::GetCpuIndices() const {
+    static const std::vector<uint32_t> s_empty;
+    return m_impl ? m_impl->cpuIndices : s_empty;
+}
+
+bool Mesh::HasCpuGeometry() const {
+    return m_impl && !m_impl->cpuVertices.empty();
 }

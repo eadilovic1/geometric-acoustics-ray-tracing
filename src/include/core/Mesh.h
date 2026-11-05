@@ -5,6 +5,7 @@
 #include "core/SubMesh.h"
 #include <cstdint>
 #include <string>
+#include <vector>
 
 /// GPU mesh with one or more independently drawable submeshes.
 ///
@@ -44,6 +45,11 @@ public:
     [[nodiscard]] const std::string& GetName()          const;
     [[nodiscard]] AABB               GetLocalBounds()   const;
     [[nodiscard]] AABB               GetSubMeshBounds(uint32_t index) const;
+
+    /// CPU geometry access for acoustic ray tracing and physics calculations.
+    [[nodiscard]] const std::vector<VertexPNT>& GetCpuVertices() const;
+    [[nodiscard]] const std::vector<uint32_t>&  GetCpuIndices() const;
+    [[nodiscard]] bool                          HasCpuGeometry() const;
 
 private:
     struct Impl;

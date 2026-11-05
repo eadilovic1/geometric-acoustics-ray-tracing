@@ -47,6 +47,8 @@ add_library(${PROJECT_NAME} STATIC
         opengl/assets/MeshImporter.cpp
         opengl/assets/ModelImporter.cpp
         opengl/core/Mesh.cpp
+        opengl/acoustics/AcousticMaterial.cpp
+        opengl/acoustics/AcousticGeometry.cpp
         include/ui/RendererUI.h
         opengl/ui/RendererUI.cpp
         
