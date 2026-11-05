@@ -21,6 +21,16 @@ struct AABB {
         max = glm::max(max, point);
     }
 
+    /// Expands the box to include another bounding box @p other.
+    void Expand(const AABB& other)
+    {
+        if (other.IsValid())
+        {
+            min = glm::min(min, other.min);
+            max = glm::max(max, other.max);
+        }
+    }
+
     /// Returns an empty (invalid) box.
     [[nodiscard]] static AABB Empty()
     {
