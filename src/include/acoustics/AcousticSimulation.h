@@ -1,8 +1,8 @@
-
 #pragma once
 
 #include "acoustics/BVH.h"
 #include "acoustics/AcousticMaterial.h"
+#include "acoustics/AcousticRay.h"
 #include "scene/Light.h"
 
 #include <glm/glm.hpp>
@@ -16,13 +16,15 @@ class LightEnvironment;
 
 namespace acoustics {
 
-// Energija po oktavnim opsezima.
-// Ovo nisu uzorci zvucnog pritiska.
+// ===========================================================================
+// DIO 3.1: Akustički izvori zvuka (preslikavanje svjetala u akustičke izvore)
+// ===========================================================================
+
 struct Source {
     enum class Pattern {
-        Omni,
-        Cone,
-        Parallel
+        Omni,      ///< PointLight -> Svesmjerni emiter (Fibonaccijeva sferna spirala)
+        Cone,      ///< SpotLight -> Usmjereni konusni emiter sa kardioidnim opadanjem
+        Parallel   ///< DirectionalLight -> Ravni talas (paralelne zrake preko diska aperture)
     };
 
     Pattern pattern = Pattern::Omni;
@@ -31,80 +33,136 @@ struct Source {
 
     glm::vec3 direction{0.0f, 0.0f, -1.0f};
 
-    float coneHalfAngleDeg = 20.0f;
+    /// Parametri konusa za SpotLight (u stepenima)
+    float coneInnerAngleDeg = 12.5f; ///< Puni intenzitet unutar ovog ugla
+    float coneOuterAngleDeg = 20.0f; ///< Opadanje do nule prema rubu konusa
 
+    /// Radijus diska aperture za paralelne zrake ravnog talasa (u metrima)
+    float emitterRadius = 5.0f;
+
+    /// Akustička snaga po oktavnim opsezima (W ili relativna energija)
     OctaveBands power{1.0f};
 };
 
-// Pretvaranje svjetlosnih izvora u akusticke izvore.
-// Ovo je demonstracijsko mapiranje,
-// ne fizicka kalibracija svjetla u zvuk.
+/// Pretvaranje PointLight u svesmjerni tačkasti akustički izvor
 Source FromLight(const PointLight& light);
 
+/// Pretvaranje SpotLight u usmjereni konusni akustički izvor
 Source FromLight(const SpotLight& light);
 
+/// Pretvaranje DirectionalLight u ravni talas (paralelne zrake) sa aperturom
 Source FromLight(
     const DirectionalLight& light,
-    const glm::vec3& emitterPosition
+    const glm::vec3& emitterPosition,
+    float beamRadius = 5.0f
 );
 
+/// Pretvaranje svih aktivnih svjetala iz okruženja u akustičke izvore
 std::vector<Source> FromLights(
     const LightEnvironment& lights,
-    const glm::vec3& directionalOrigin
+    const glm::vec3& directionalOrigin,
+    float directionalBeamRadius = 5.0f
 );
 
 
-// DIO 4: binauralni prijemnik
+// ===========================================================================
+// DIO 4.1 & 4.2: Binauralni prijemnik (Dvije sfere ušiju + centralna sfera glave)
+// ===========================================================================
+
 struct Receiver {
     glm::vec3 headCenter{0.0f};
 
     glm::vec3 right{1.0f, 0.0f, 0.0f};
 
-    float earSpacing = 0.18f;
+    glm::vec3 forward{0.0f, 0.0f, -1.0f};
 
-    float earRadius = 0.09f;
+    glm::vec3 up{0.0f, 1.0f, 0.0f};
 
-    float headRadius = 0.085f;
+    /// Antropometrijski polurazmak glave a = 8.75 cm -> razmak ušiju 2a = 17.5 cm (0.175 m).
+    float earSpacing = 0.175f;
 
-    // Pojednostavljena geometrijska sjena glave.
+    /// Radijus sfere uha rd = 2.5 cm (0.025 m).
+    /// Zadovoljava rd < a i rd <= a / 2: sfere ušiju se NIKADA ne preklapaju (razmak je 12.5 cm).
+    /// Vremenski razmaz unutar sfere 2*rd/c ≈ 0.14 ms << ITD_max (0.51 ms).
+    float earRadius = 0.025f;
+
+    /// Sfera glave u centru za ILD: Rh = a - rd = 6.25 cm (0.0625 m).
+    float headRadius = 0.0625f;
+
+    /// Prekidač za fizikalno ILD zasjenjenje glavom
     bool headShadow = true;
+
+    /// Koeficijenti apsorpcije materijala glave (koža i kosa) po ISO oktavnim opsezima
+    OctaveBands headMaterialAbsorption{0.10f, 0.15f, 0.25f, 0.40f, 0.65f, 0.80f, 0.85f};
 
     [[nodiscard]] glm::vec3 LeftEar() const;
 
     [[nodiscard]] glm::vec3 RightEar() const;
 
-    void FollowCamera(const Camera& camera);
+    /// Postavlja centar i orijentaciju slušaoca prema kameri:
+    /// - FreeFly i FirstPerson: headCenter = camera.GetPosition()
+    /// - ThirdPerson: headCenter = camera.GetOrbitTarget() + up * eyeHeightOffset
+    void FollowCamera(const Camera& camera, float eyeHeightOffset = 1.65f);
 };
 
 
-// DIO 4: ehogram
+// ===========================================================================
+// DIO 4.4: Dvokanalni Ehogram (L & R energetski histogram odziva)
+// ===========================================================================
+
 struct Echogram {
-    float sampleRate = 1000.0f;
+    /// Frekvencija odabiranja ehograma.
+    /// Po planu i ISO standardu fs = 48 kHz -> Δt = 20.83 μs
+    /// Neophodna rezolucija za očuvanje sub-milisekundnog ITD-a (24-25 uzoraka na 90°).
+    float sampleRate = 48000.0f;
 
     std::vector<OctaveBands> left;
 
     std::vector<OctaveBands> right;
 
-    Echogram(
+    explicit Echogram(
         float durationSec = 2.0f,
-        float binsPerSecond = 1000.0f
+        float binsPerSecond = 48000.0f
     );
 
     void Clear();
 
+    [[nodiscard]] size_t BinCount() const { return left.size(); }
+    [[nodiscard]] float DurationSec() const { return sampleRate > 0.0f ? static_cast<float>(left.size()) / sampleRate : 0.0f; }
+    [[nodiscard]] float BinDurationSec() const { return sampleRate > 0.0f ? 1.0f / sampleRate : 0.0f; }
+
+    /// Direktni upis energije u pojedinačni vremenski trenutak
     void Deposit(
         bool isLeft,
         float arrivalTime,
         const OctaveBands& energy
     );
+
+    /// Upis energije po indeksu vremenskog bina
+    void DepositByIndex(
+        bool isLeft,
+        size_t binIndex,
+        const OctaveBands& energy
+    );
+
+    /// Kontinuirani raspodijeljeni upis energije tetive kroz vremenske binove
+    void DepositChordSpan(
+        bool isLeft,
+        float tStart,
+        float tEnd,
+        const OctaveBands& totalEnergy
+    );
 };
 
 
-// DIO 3: postavke simulacije
-struct Settings {
-    uint32_t raysPerSource = 10000;
+// ===========================================================================
+// DIO 3: Postavke simulacije
+// ===========================================================================
 
-    uint32_t maxBounces = 12;
+struct Settings {
+    uint32_t raysPerSource = 50000;
+
+    uint32_t maxBounces = 50;
 
     float speedOfSound = 343.0f;
 
@@ -112,21 +170,24 @@ struct Settings {
 
     float maxSegmentDistance = 1000.0f;
 
-    float minEnergy = 1e-8f;
+    /// Prag za Ruski rulet: -60 dB (10^-6 E0)
+    float minEnergyFraction = 1e-6f;
+
+    /// Vjerovatnoća gašenja ispod -60 dB (p = 0.1)
+    float russianRouletteProb = 0.1f;
 
     float rayOffset = 0.001f;
 
-    uint32_t russianRouletteStart = 4;
-
-    // Priblizni koeficijenti slabljenja po metru.
+    /// ISO 9613-1 standardni koeficijenti slabljenja energije u zraku (20°C, 50% RH) [1/m]
+    /// za frekvencije {125, 250, 500, 1000, 2000, 4000, 8000} Hz
     OctaveBands airAbsorption{
-        0.0001f,
-        0.0002f,
-        0.0004f,
-        0.0008f,
-        0.002f,
-        0.006f,
-        0.018f
+        0.00003f,
+        0.00009f,
+        0.00023f,
+        0.00044f,
+        0.00085f,
+        0.00223f,
+        0.00755f
     };
 
     uint32_t randomSeed = 42;
@@ -143,7 +204,11 @@ struct TraceStats {
 
     uint64_t earHits = 0;
 
+    uint64_t headOcclusions = 0;
+
     uint64_t escaped = 0;
+
+    uint64_t russianRouletteKills = 0;
 };
 
 
