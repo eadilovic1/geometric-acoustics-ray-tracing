@@ -110,6 +110,8 @@ void TestRt60AndEdt() {
     Expect(band.rt60FromT30.IsValid(), "RT60 regression is valid");
     Expect(Near(band.rt60FromT30.value, kRt60, 0.025), "RT60 is within 25 ms of 0.50 s");
     Expect(band.edt.IsValid(), "EDT regression is valid");
+    Expect(band.rt60FromT20.IsValid(), "T20 regression is valid");
+    Expect(Near(band.rt60FromT20.value, kRt60, 0.025), "T20 matches the same exponential");
     Expect(Near(band.edt.value, kRt60, 0.025), "EDT matches the same exponential");
     Expect(metrics.left.bands[0].rt60FromT30.status == acoustics::MetricStatus::NoEnergy,
            "unused octave band stays invalid");
@@ -245,6 +247,26 @@ void TestChannelIndependence() {
            "left and right RT60 stay independent");
     Expect(Near(metrics.left.bands[1].edt.value, 0.40, 0.03) && Near(metrics.right.bands[1].edt.value, 0.80, 0.03),
            "EDT is also independent per ear");
+}
+
+void TestBroadbandMetrics() {
+    constexpr double kRate = 4000.0;
+    auto echogram = MakeEchogram(1.2f, static_cast<float>(kRate));
+    const auto energy1 = ExponentialEnergy(static_cast<std::size_t>(kRate * 1.2), kRate, 0.50);
+    const auto energy2 = ExponentialEnergy(static_cast<std::size_t>(kRate * 1.2), kRate, 0.50);
+    FillBand(echogram.left, 2, energy1);
+    FillBand(echogram.left, 3, energy2);
+
+    const auto metrics = acoustics::RoomMetrics::Compute(echogram);
+    const auto& overall = metrics.left.overall;
+    Expect(overall.decay.IsValid(), "broadband decay is valid");
+    Expect(MonotoneNonIncreasing(overall.decay.levelDb), "broadband Schroeder curve is monotone");
+    Expect(overall.rt60FromT30.IsValid(), "broadband RT60 is valid");
+    Expect(Near(overall.rt60FromT30.value, 0.50, 0.03), "broadband RT60 matches exponential");
+    Expect(overall.rt60FromT20.IsValid(), "broadband T20 is valid");
+    Expect(Near(overall.rt60FromT20.value, 0.50, 0.03), "broadband T20 matches exponential");
+    Expect(metrics.left.MidFrequencyRt60().IsValid(), "mid-frequency RT60 is valid");
+    Expect(Near(metrics.left.MidFrequencyRt60().value, 0.50, 0.03), "mid-frequency RT60 matches exponential");
 }
 
 void TestBandpassStability() {
@@ -527,6 +549,7 @@ int main() {
     TestInsufficientDynamicRange();
     TestNoiseFloor();
     TestChannelIndependence();
+    TestBroadbandMetrics();
     TestBandpassStability();
     TestImpulseResponseContract();
     TestConvolution();

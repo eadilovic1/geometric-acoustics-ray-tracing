@@ -54,7 +54,7 @@ struct ScalarMetric {
     [[nodiscard]] bool IsValid() const noexcept { return status == MetricStatus::Ok; }
 };
 
-/// Normalizovana Schroederova kriva jednog opsega.
+/// Normalizovana Schroederova kriva jednog opsega ili ukupnog odziva.
 /// levelDb[k] = 10 log10(E[k] / E[0]), E[k] = suma energije od k do kraja.
 struct BandDecay {
     MetricStatus status = MetricStatus::EmptyInput;
@@ -67,6 +67,7 @@ struct BandDecay {
 struct BandResult {
     BandDecay decay;
     ScalarMetric rt60FromT30; ///< T30 regresija (-5 dB .. -35 dB), ekstrapolacija na 60 dB
+    ScalarMetric rt60FromT20; ///< T20 regresija (-5 dB .. -25 dB), ekstrapolacija na 60 dB
     ScalarMetric edt;         ///< EDT regresija (0 dB .. -10 dB), ekstrapolacija na 60 dB
     ScalarMetric c50Db;
     ScalarMetric c80Db;
@@ -75,6 +76,19 @@ struct BandResult {
 
 struct ChannelMetrics {
     std::array<BandResult, OctaveBands::Count> bands{};
+    BandResult overall{}; ///< Ukupna (broadband) Schroederova kriva i metrike po formuli 5.1 (suma svih 7 opsega)
+
+    /// ISO 3382-1 srednjofrekventni prosjek T_mid = (T_30(500 Hz) + T_30(1000 Hz)) / 2
+    [[nodiscard]] ScalarMetric MidFrequencyRt60() const noexcept {
+        const auto& b500 = bands[2].rt60FromT30;
+        const auto& b1000 = bands[3].rt60FromT30;
+        if (b500.IsValid() && b1000.IsValid()) {
+            return {MetricStatus::Ok, 0.5 * (b500.value + b1000.value)};
+        }
+        if (b500.IsValid()) return b500;
+        if (b1000.IsValid()) return b1000;
+        return overall.rt60FromT30;
+    }
 };
 
 struct RoomMetricsResult {
@@ -101,7 +115,11 @@ public:
 
     [[nodiscard]] static RoomMetricsResult Compute(
         const Echogram& echogram,
-        const Options& options = {}
+        const Options& options
+    );
+
+    [[nodiscard]] static RoomMetricsResult Compute(
+        const Echogram& echogram
     );
 };
 

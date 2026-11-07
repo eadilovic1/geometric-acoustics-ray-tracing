@@ -12,11 +12,6 @@ namespace acoustics {
 // ---------------------------------------------------------------------------
 // Korak 6: sinteza stereo impulsnog odziva i auralizacija.
 //
-// miniaudio nije dio repozitorija i nije dodavan. Citanje i pisanje WAV-a
-// te FFT overlap-add su vlastita implementacija. Reprodukcija koristi
-// sistemski WinMM PlaySound i ne uvodi novu biblioteku. Ako PlaySound nije
-// dostupan, sinteza, konvolucija i WAV i dalje rade.
-//
 // Povezivanje sa korakom 4, bez izmjene Simulator-a:
 //
 //   const StereoAudio ir = AudioEngine::SynthesizeImpulseResponse(echogram).audio;
@@ -95,21 +90,22 @@ public:
         float peakTarget = 0.99f;
     };
 
-    /// Rekonstrukcija h_L / h_R iz ehograma.
+    /// Rekonstrukcija h_L / h_R iz ehograma po planu implementacije (Stavka 6.1)
+    /// i teorijskom dokumentu (poglavlje 7.2):
     ///
-    /// Za svaki od 7 oktavnih opsega (125 .. 8000 Hz):
-    ///   A_b[n] = sqrt(max(E_b[n], 0))
-    ///   w_b    = Butterworth4(bijeli sum; razlicit seed za L i R)
-    ///   w_b se normalizuje na jedinicni RMS, zatim h += A_b * w_b
-    ///
-    /// Ogranicenje stohasticke rekonstrukcije: faza nosioca je slucajna.
-    /// Direktni zvuk i rane refleksije zato nisu deterministicki impulsi,
-    /// nego kratki sum u vremenskom binu ehograma. Obvojnica se primjenjuje
-    /// nakon filtriranja, pa vremenski raspored energije ostaje na uzorcima
-    /// ehograma. Ostar prekid obvojnice blago prosiri spektar oko tog bina.
+    /// 1. Za svaki opseg b: A_b[n] = sqrt(max(E_b[n], 0))
+    /// 2. Mnozenje obvojnice Gaussovim bijelim sumom: s_b[n] = A_b[n] * w_b[n], w_b ~ N(0, 1)
+    ///    (razlicit seed za L i R omogucava stohasticku stereo dekorelaciju)
+    /// 3. Filtriranje modulisanog signala kroz digitalni Butterworth pojasni propusnik 4. reda
+    /// 4. Sabiranje svih 7 filtriranih opsega u konacni impulsni odziv:
+    ///    h_L[n] = sum_{b=0..6} h_{L, b}[n],  h_R[n] = sum_{b=0..6} h_{R, b}[n]
     [[nodiscard]] static SynthResult SynthesizeImpulseResponse(
         const Echogram& echogram,
-        const SynthOptions& options = {}
+        const SynthOptions& options
+    );
+
+    [[nodiscard]] static SynthResult SynthesizeImpulseResponse(
+        const Echogram& echogram
     );
 
     /// y_L = x * h_L, y_R = x * h_R, FFT overlap-add.
@@ -145,7 +141,7 @@ public:
     [[nodiscard]] static PlaybackResult PlayWavFile(const std::filesystem::path& path);
 
     /// Sinteticki ehogram + kratki sinus, bez vezivanja za korake 1-4.
-    /// playAudio pokrece WinMM samo kada je eksplicitno trazeno.
+    /// playAudio pokrece audio reprodukciju samo kada je eksplicitno trazeno.
     [[nodiscard]] static DemoOutput RunSyntheticDemo(
         const std::filesystem::path& wavPath,
         bool playAudio = false

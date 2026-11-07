@@ -116,6 +116,10 @@ if(TARGET assimp::assimp)
     target_link_libraries(${PROJECT_NAME} PUBLIC assimp::assimp)
 endif()
 
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PUBLIC winmm)
+endif()
+
 # Koraci 5 i 6: zaseban test, bez izmjene TestApp-a i koraka 1-4.
 add_executable(AcousticsStepTests
     opengl/acoustics/AcousticsStepTests.cpp

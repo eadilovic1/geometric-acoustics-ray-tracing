@@ -11,6 +11,7 @@ namespace {
 
 constexpr double kRt60StartDb = -5.0;
 constexpr double kRt60EndDb = -35.0;
+constexpr double kRt60T20EndDb = -25.0;
 constexpr double kEdtStartDb = 0.0;
 constexpr double kEdtEndDb = -10.0;
 constexpr double kExtrapolationDb = 60.0;
@@ -23,11 +24,13 @@ struct ExtractedBand {
 void FailBand(BandResult& band, MetricStatus status) {
     band.decay.status = status;
     band.rt60FromT30.status = status;
+    band.rt60FromT20.status = status;
     band.edt.status = status;
     band.c50Db.status = status;
     band.c80Db.status = status;
     band.d50Percent.status = status;
     band.rt60FromT30.value = 0.0;
+    band.rt60FromT20.value = 0.0;
     band.edt.value = 0.0;
     band.c50Db.value = 0.0;
     band.c80Db.value = 0.0;
@@ -119,6 +122,61 @@ ExtractedBand ExtractBand(
             return extracted;
         }
         extracted.energy.push_back(static_cast<double>(std::max(0.0f, value)));
+    }
+
+    double peak = 0.0;
+    for (double sample : extracted.energy) peak = std::max(peak, sample);
+    if (!(peak > 0.0)) {
+        extracted.status = MetricStatus::NoEnergy;
+        extracted.energy.clear();
+        return extracted;
+    }
+
+    const double onset = peak * std::max(0.0, options.onsetFraction);
+    TrimSilence(extracted.energy, onset);
+    SubtractFlatNoiseFloor(extracted.energy);
+
+    double cleanedPeak = 0.0;
+    for (double sample : extracted.energy) cleanedPeak = std::max(cleanedPeak, sample);
+    const double dust = cleanedPeak * std::max(0.0, options.dustFraction);
+    if (dust > 0.0) {
+        for (double& sample : extracted.energy) {
+            if (sample < dust) sample = 0.0;
+        }
+    }
+    TrimSilence(extracted.energy, 0.0);
+
+    double total = 0.0;
+    for (double sample : extracted.energy) total += sample;
+    if (extracted.energy.empty() || !(total > 0.0)) {
+        extracted.status = MetricStatus::NoEnergy;
+        extracted.energy.clear();
+        return extracted;
+    }
+
+    extracted.status = MetricStatus::Ok;
+    return extracted;
+}
+
+ExtractedBand ExtractBroadband(
+    const std::vector<OctaveBands>& bins,
+    const RoomMetrics::Options& options
+) {
+    ExtractedBand extracted;
+    extracted.energy.reserve(bins.size());
+
+    for (const OctaveBands& bin : bins) {
+        double sum = 0.0;
+        for (std::size_t band = 0; band < OctaveBands::Count; ++band) {
+            const float value = bin[band];
+            if (!std::isfinite(value)) {
+                extracted.status = MetricStatus::NonFiniteInput;
+                extracted.energy.clear();
+                return extracted;
+            }
+            sum += static_cast<double>(std::max(0.0f, value));
+        }
+        extracted.energy.push_back(sum);
     }
 
     double peak = 0.0;
@@ -370,6 +428,10 @@ void AnalyzeExtracted(
         band.decay.levelDb, sampleRate,
         kRt60StartDb, kRt60EndDb, -kRt60EndDb, options
     );
+    band.rt60FromT20 = Regress(
+        band.decay.levelDb, sampleRate,
+        kRt60StartDb, kRt60T20EndDb, -kRt60T20EndDb, options
+    );
     band.edt = Regress(
         band.decay.levelDb, sampleRate,
         kEdtStartDb, kEdtEndDb, -kEdtEndDb, options
@@ -384,10 +446,12 @@ void AnalyzeChannel(
 ) {
     if (bins.empty()) {
         for (BandResult& band : channel.bands) FailBand(band, MetricStatus::EmptyInput);
+        FailBand(channel.overall, MetricStatus::EmptyInput);
         return;
     }
     if (!(sampleRate > 0.0) || !std::isfinite(sampleRate)) {
         for (BandResult& band : channel.bands) FailBand(band, MetricStatus::InvalidSampleRate);
+        FailBand(channel.overall, MetricStatus::InvalidSampleRate);
         return;
     }
 
@@ -395,9 +459,16 @@ void AnalyzeChannel(
         const ExtractedBand extracted = ExtractBand(bins, bandIndex, options);
         AnalyzeExtracted(extracted, sampleRate, options, channel.bands[bandIndex]);
     }
+
+    const ExtractedBand extractedOverall = ExtractBroadband(bins, options);
+    AnalyzeExtracted(extractedOverall, sampleRate, options, channel.overall);
 }
 
 } // namespace
+
+RoomMetricsResult RoomMetrics::Compute(const Echogram& echogram) {
+    return Compute(echogram, Options{});
+}
 
 RoomMetricsResult RoomMetrics::Compute(const Echogram& echogram, const Options& options) {
     RoomMetricsResult result;

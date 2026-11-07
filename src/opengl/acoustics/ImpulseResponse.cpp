@@ -13,18 +13,35 @@ class DeterministicNoise {
 public:
     explicit DeterministicNoise(uint32_t seed) : state_(seed == 0u ? 0xA341316Cu : seed) {}
 
-    float Next() noexcept {
+    float NextGaussian() noexcept {
+        if (hasCached_) {
+            hasCached_ = false;
+            return cached_;
+        }
+        const float u1 = NextUniformPositive();
+        const float u2 = NextUniformPositive();
+        const float radius = std::sqrt(-2.0f * std::log(u1));
+        constexpr float kTwoPi = 6.28318530717958647692f;
+        const float theta = kTwoPi * u2;
+        cached_ = radius * std::sin(theta);
+        hasCached_ = true;
+        return radius * std::cos(theta);
+    }
+
+private:
+    uint32_t state_;
+    float cached_ = 0.0f;
+    bool hasCached_ = false;
+
+    float NextUniformPositive() noexcept {
         uint32_t x = state_;
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
         state_ = x;
-        constexpr float kScale = 1.0f / 2147483648.0f;
-        return static_cast<float>(static_cast<int32_t>(x)) * kScale;
+        // Strogo pozitivan broj u (0, 1] kako bi std::log(u1) bio uvijek definisan
+        return (static_cast<float>(x & 0x00FFFFFFu) + 1.0f) / 16777218.0f;
     }
-
-private:
-    uint32_t state_;
 };
 
 bool ChannelFinite(const std::vector<float>& samples) {
@@ -53,26 +70,21 @@ void SynthesizeChannel(
         ButterworthBandpass filter(sampleRate, center);
         if (!filter.IsValid()) continue;
 
-        std::vector<float> carrier(count, 0.0f);
-        double sumSquares = 0.0;
-        for (std::size_t n = 0; n < count; ++n) {
-            const float sample = filter.Process(noise.Next());
-            carrier[n] = sample;
-            sumSquares += static_cast<double>(sample) * static_cast<double>(sample);
-        }
-
-        const double rms = std::sqrt(sumSquares / static_cast<double>(count));
-        if (!(rms > 1e-12) || !std::isfinite(rms)) continue;
-        const double scale = 1.0 / rms;
-
         for (std::size_t n = 0; n < count; ++n) {
             const float energy = bins[n][band];
             if (!std::isfinite(energy)) {
                 finite = false;
                 continue;
             }
+            // 1. Obvojnica pritiska: A_b[n] = sqrt(max(E_b[n], 0))
             const double amplitude = std::sqrt(static_cast<double>(std::max(0.0f, energy)));
-            accum[n] += static_cast<double>(carrier[n]) * scale * amplitude;
+            // 2. Modulacija Gaussovim bijelim sumom: s_b[n] = A_b[n] * w_b[n], w_b ~ N(0, 1)
+            const float w = noise.NextGaussian();
+            const float modulated = static_cast<float>(amplitude * static_cast<double>(w));
+            // 3. Filtriranje modulisanog signala kroz Butterworth propusnik 4. reda
+            const float filtered = filter.Process(modulated);
+            // 4. Sabiranje po opsezima
+            accum[n] += static_cast<double>(filtered);
         }
     }
 
@@ -102,6 +114,10 @@ void PeakNormalize(StereoAudio& audio, float peakTarget) {
 
 bool StereoAudio::IsFinite() const {
     return ChannelFinite(left) && ChannelFinite(right);
+}
+
+SynthResult AudioEngine::SynthesizeImpulseResponse(const Echogram& echogram) {
+    return SynthesizeImpulseResponse(echogram, SynthOptions{});
 }
 
 SynthResult AudioEngine::SynthesizeImpulseResponse(const Echogram& echogram, const SynthOptions& options) {
