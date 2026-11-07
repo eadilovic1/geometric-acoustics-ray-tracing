@@ -51,6 +51,11 @@ add_library(${PROJECT_NAME} STATIC
         opengl/acoustics/AcousticGeometry.cpp
         opengl/acoustics/BVH.cpp
         opengl/acoustics/AcousticSimulation.cpp
+        opengl/acoustics/RoomMetrics.cpp
+        opengl/acoustics/BandpassFilter.cpp
+        opengl/acoustics/ImpulseResponse.cpp
+        opengl/acoustics/AudioConvolution.cpp
+        opengl/acoustics/WavIo.cpp
         include/ui/RendererUI.h
         opengl/ui/RendererUI.cpp
         
@@ -110,3 +115,14 @@ endif()
 if(TARGET assimp::assimp)
     target_link_libraries(${PROJECT_NAME} PUBLIC assimp::assimp)
 endif()
+
+# Koraci 5 i 6: zaseban test, bez izmjene TestApp-a i koraka 1-4.
+add_executable(AcousticsStepTests
+    opengl/acoustics/AcousticsStepTests.cpp
+)
+target_link_libraries(AcousticsStepTests PRIVATE ${PROJECT_NAME})
+
+add_executable(AuralizationDemo
+    opengl/acoustics/AuralizationDemo.cpp
+)
+target_link_libraries(AuralizationDemo PRIVATE ${PROJECT_NAME})
