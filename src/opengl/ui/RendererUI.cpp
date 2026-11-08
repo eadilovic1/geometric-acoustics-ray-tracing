@@ -3,14 +3,17 @@
 
 #include "acoustics/AcousticSimulation.h"
 #include "core/Camera.h"
+#include "core/Primitives.h"
 #include "core/Renderer.h"
 #include "core/MouseInput.h"
+#include "core/ShaderProgram.h"
 #include "scene/Scene.h"
 #include "scene/LightEnvironment.h"
 #include "scene/FrameSubmission.h"
 #include "core/Material.h"
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <glm/gtc/matrix_transform.hpp>
 #include <cstdarg>
 #include <cmath>
 #include <cstdio>
@@ -19,6 +22,50 @@
 #include <utility>
 
 // Pal colours and SectionHeader are now in UITheme.h (shared with scene tabs).
+
+RendererUI::RendererUI() = default;
+RendererUI::~RendererUI() = default;
+
+namespace {
+struct AcousticDebugGLState {
+    GLboolean depthTest = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean blend = glIsEnabled(GL_BLEND);
+    GLboolean cull = glIsEnabled(GL_CULL_FACE);
+    GLboolean depthWrite;
+    GLint program, vao, arrayBuffer;
+    GLint depthFunc, cullMode;
+    GLint blendSrcRgb, blendDstRgb, blendSrcAlpha, blendDstAlpha, blendEqRgb, blendEqAlpha;
+
+    AcousticDebugGLState() {
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWrite);
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &arrayBuffer);
+        glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+        glGetIntegerv(GL_CULL_FACE_MODE, &cullMode);
+        glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRgb);
+        glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRgb);
+        glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
+        glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
+        glGetIntegerv(GL_BLEND_EQUATION_RGB, &blendEqRgb);
+        glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &blendEqAlpha);
+    }
+
+    ~AcousticDebugGLState() {
+        glUseProgram(program);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, arrayBuffer);
+        glDepthMask(depthWrite);
+        glDepthFunc(depthFunc);
+        glCullFace(cullMode);
+        glBlendFuncSeparate(blendSrcRgb, blendDstRgb, blendSrcAlpha, blendDstAlpha);
+        glBlendEquationSeparate(blendEqRgb, blendEqAlpha);
+        (depthTest ? glEnable : glDisable)(GL_DEPTH_TEST);
+        (blend ? glEnable : glDisable)(GL_BLEND);
+        (cull ? glEnable : glDisable)(GL_CULL_FACE);
+    }
+};
+} // namespace
 
 static constexpr float kPanelPadding = 12.0f;
 static constexpr float kRounding = 10.0f;
@@ -1523,6 +1570,82 @@ void RendererUI::PlayAcousticResponse(const acoustics::MonoAudio &dry) {
     m_acousticAudioMessage = acoustics::AudioEngine::PlayStereo(*m_acousticWet).message;
 }
 
+void RendererUI::DrawAcousticDebug(const Scene &scene) {
+    if (m_acousticScene != &scene || !m_acousticRun)
+        return;
+
+    auto &run = *m_acousticRun;
+    const bool drawRays = m_showAcousticRays && !run.debugSegments.empty();
+    if (!drawRays && !m_showAcousticReceiver)
+        return;
+
+    if (!m_acousticDebugShader) {
+        m_acousticDebugShader = std::make_unique<ShaderProgram>(
+            "assets/shaders/basic.vert", "assets/shaders/acoustic_debug.frag");
+    }
+    if (!m_acousticDebugShader->IsValid())
+        return;
+
+    const AcousticDebugGLState previousState;
+    if (drawRays && !run.debugRayMesh) {
+        constexpr glm::vec3 direct{0.10f, 1.0f, 0.25f};
+        constexpr glm::vec3 firstReflection{1.0f, 0.83f, 0.06f};
+        constexpr glm::vec3 laterReflection{1.0f, 0.32f, 0.05f};
+        PrimitiveMeshData rays;
+        rays.vertices.reserve(2 * run.debugSegments.size());
+        for (const auto &segment : run.debugSegments) {
+            if (segment.bounceCount > m_acousticDisplayedBounces)
+                continue;
+            const float order = static_cast<float>(std::min(segment.bounceCount, 5u));
+            const glm::vec3 color = segment.bounceCount == 0 ? direct :
+                glm::mix(firstReflection, laterReflection, (order - 1.0f) / 4.0f);
+            rays.vertices.push_back({segment.start, color});
+            rays.vertices.push_back({segment.end, color});
+        }
+        run.debugRayMesh = std::make_unique<MeshBuffer>(rays.CreateMeshBuffer());
+    }
+    if (m_showAcousticReceiver && !m_acousticDebugSphere) {
+        // MeshBuffer uploads indices before binding its own VAO. Keep the scene's VAO intact.
+        const VertexArray uploadVao;
+        uploadVao.Bind();
+        m_acousticDebugSphere = std::make_unique<MeshBuffer>(
+            GenerateSphere(1.0f, 12, {.colorMode = ColorMode::Solid}).CreateMeshBuffer());
+    }
+
+    auto &shader = *m_acousticDebugShader;
+    shader.Bind();
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
+    const auto drawSphere = [&](const glm::vec3 &center, float radius, const glm::vec4 &color) {
+        const auto model = glm::scale(glm::translate(glm::mat4(1.0f), center), glm::vec3(radius));
+        shader.SetUniform("u_Model", model);
+        shader.SetUniform("u_Tint", color);
+        m_acousticDebugSphere->Draw();
+    };
+    const auto &listener = run.listener;
+    if (m_showAcousticReceiver) {
+        glDepthMask(GL_TRUE);
+        drawSphere(listener.LeftEar(), listener.earRadius, {0.12f, 0.37f, 1.0f, 1.0f});
+        drawSphere(listener.RightEar(), listener.earRadius, {1.0f, 0.08f, 0.12f, 1.0f});
+    }
+    glDepthMask(GL_FALSE);
+    if (drawRays) {
+        shader.SetUniform("u_Model", glm::mat4(1.0f));
+        shader.SetUniform("u_Tint", glm::vec4(1.0f));
+        run.debugRayMesh->Draw(GL_LINES);
+    }
+    if (m_showAcousticReceiver) {
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        drawSphere(listener.headCenter, listener.headRadius, {0.80f, 0.87f, 1.0f, 0.32f});
+    }
+}
+
 void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
     constexpr float centimetersPerMeter = 100.0f;
     constexpr ImGuiSliderFlags clamp = ImGuiSliderFlags_AlwaysClamp;
@@ -1617,7 +1740,7 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         runSettings.SetAirConditions(m_acousticAir);
         AcousticRun run{listener, acoustics::Echogram(runSettings.maxDuration), {},
                         geometry.GetTriangleCount(), m_acousticAir, runSettings.speedOfSound};
-        run.stats = simulator.Run(sources, run.listener, run.echogram, runSettings);
+        run.stats = simulator.Run(sources, run.listener, run.echogram, runSettings, &run.debugSegments);
         run.metrics = acoustics::RoomMetrics::Compute(run.echogram);
         run.enclosedVolume = scene.GetEnclosedAcousticVolume();
         if (run.enclosedVolume > 0.0f) {
@@ -1667,6 +1790,28 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
             ImGui::PushStyleColor(ImGuiCol_Text, Pal::Orange);
             ImGui::TextWrapped("%s", m_acousticError.c_str());
             ImGui::PopStyleColor();
+        }
+        ImGui::Unindent();
+        ImGui::Spacing();
+    }
+
+    if (SectionHeader("3D Debug View")) {
+        ImGui::Indent();
+        ImGui::Checkbox("Show ray paths", &m_showAcousticRays);
+        ImGui::Checkbox("Show listener", &m_showAcousticReceiver);
+        if (m_acousticRun) {
+            constexpr uint32_t directOnly = 0;
+            ImGui::BeginDisabled(!m_showAcousticRays);
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
+            if (ImGui::SliderScalar("Displayed reflections", ImGuiDataType_U32, &m_acousticDisplayedBounces,
+                                    &directOnly, &settings.maxBounces, "%u", clamp))
+                m_acousticRun->debugRayMesh.reset();
+            ImGui::EndDisabled();
+            ImGui::TextWrapped("Green: direct segments. Yellow to orange: reflected segments.");
+            ImGui::TextWrapped("Blue: left ear. Red: right ear.");
+            ImGui::TextWrapped("Showing the last run. Move the camera to inspect the listener.");
+        } else {
+            ImGui::TextWrapped("Run a simulation to display the paths and listener.");
         }
         ImGui::Unindent();
         ImGui::Spacing();

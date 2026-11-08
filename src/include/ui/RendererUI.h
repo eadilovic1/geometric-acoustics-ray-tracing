@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -10,8 +11,10 @@
 #include "core/IBLDebugMode.h"
 
 class Scene;
+class MeshBuffer;
 class Renderer;
 class MouseInput;
+class ShaderProgram;
 struct RendererDebugStats;
 struct FrameSubmission;
 
@@ -29,7 +32,8 @@ enum class UITab : int {
 
 class RendererUI {
 public:
-    RendererUI() = default;
+    RendererUI();
+    ~RendererUI();
 
     /// Apply the global ImGui theme. Call once after ImGui::CreateContext(),
     /// or whenever you want to re-apply (e.g. after a style reset).
@@ -43,6 +47,9 @@ public:
               MouseInput *mouse,
               const std::vector<Scene *> &scenes,
               std::size_t &activeSceneIndex);
+
+    /// Draw the last simulation's debug geometry into the current scene framebuffer.
+    void DrawAcousticDebug(const Scene &scene);
 
     /// Returns the viewport rectangle [x, y, w, h] in framebuffer pixels.
     /// Forward this to Renderer::Resize() / SetViewport() every frame.
@@ -98,6 +105,8 @@ private:
         int plottedEchoBand = -1;
         std::vector<float> leftEchoPeaks;
         std::vector<float> rightEchoPeaks;
+        std::vector<acoustics::RayDebugSegment> debugSegments;
+        std::unique_ptr<MeshBuffer> debugRayMesh;
     };
 
     const Scene *m_acousticScene = nullptr;
@@ -114,6 +123,11 @@ private:
     int m_acousticGraphKind = 0;
     int m_acousticMetricEar = 0;
     int m_acousticRt60Fit = 0;
+    bool m_showAcousticRays = false;
+    bool m_showAcousticReceiver = false;
+    uint32_t m_acousticDisplayedBounces = 5;
+    std::unique_ptr<ShaderProgram> m_acousticDebugShader;
+    std::unique_ptr<MeshBuffer> m_acousticDebugSphere;
 
     // ── Draw helpers ──────────────────────────────────────────────────────────
     void DrawTopbar(int fbWidth,
