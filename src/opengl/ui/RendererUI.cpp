@@ -1541,8 +1541,7 @@ void RendererUI::DrawAcousticMetrics(const AcousticRun &run) {
 }
 
 void RendererUI::ResetAcousticAudio() {
-    if (m_acousticWet)
-        acoustics::AudioEngine::StopPlayback();
+    acoustics::AudioEngine::StopPlayback();
     m_acousticWet.reset();
     m_acousticAudioMessage.clear();
 }
@@ -1843,22 +1842,37 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::BeginDisabled(!m_acousticWet);
+        if (ImGui::Button("Replay Last"))
+            m_acousticAudioMessage = acoustics::AudioEngine::PlayStereo(*m_acousticWet).message;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
         if (ImGui::Button("Stop Preview"))
             acoustics::AudioEngine::StopPlayback();
-        ImGui::EndDisabled();
 
-        ImGui::TextUnformatted("Stereo output path");
+        ImGui::TextUnformatted("Stereo WAV path (save or play)");
         ImGui::SetNextItemWidth(width);
-        ImGui::InputText("##outputWavPath", m_acousticOutputPath, sizeof(m_acousticOutputPath));
-        ImGui::BeginDisabled(!m_acousticWet || m_acousticOutputPath[0] == '\0');
+        ImGui::InputText("##stereoWavPath", m_acousticStereoPath, sizeof(m_acousticStereoPath));
+        const bool hasStereoPath = m_acousticStereoPath[0] != '\0';
+        ImGui::BeginDisabled(!m_acousticWet || !hasStereoPath);
         if (ImGui::Button("Save to WAV")) {
             try {
-                const auto path = std::filesystem::u8path(m_acousticOutputPath);
+                const auto path = std::filesystem::u8path(m_acousticStereoPath);
                 if (std::filesystem::exists(std::filesystem::symlink_status(path))) {
                     m_acousticAudioMessage = "This path already exists. Choose a new output file.";
                 } else {
                     m_acousticAudioMessage = acoustics::AudioEngine::WriteStereoWav(path, *m_acousticWet).message;
                 }
+            } catch (const std::exception &error) {
+                m_acousticAudioMessage = error.what();
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!hasStereoPath);
+        if (ImGui::Button("Play Saved WAV")) {
+            try {
+                const auto path = std::filesystem::u8path(m_acousticStereoPath);
+                m_acousticAudioMessage = acoustics::AudioEngine::PlayWavFile(path).message;
             } catch (const std::exception &error) {
                 m_acousticAudioMessage = error.what();
             }

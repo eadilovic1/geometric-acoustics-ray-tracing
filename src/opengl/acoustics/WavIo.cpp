@@ -396,8 +396,7 @@ PlaybackResult AudioEngine::PlayStereo(const StereoAudio& audio) {
 
 void AudioEngine::StopPlayback() {
 #if defined(_WIN32)
-    auto& bytes = PlayingWavBytes();
-    if (!bytes.empty() && PlaySoundW(nullptr, nullptr, 0)) bytes.clear();
+    if (PlaySoundW(nullptr, nullptr, 0)) PlayingWavBytes().clear();
 #endif
 }
 
@@ -415,6 +414,7 @@ PlaybackResult AudioEngine::PlayWavFile(const std::filesystem::path& path) {
         return result;
     }
 
+    StopPlayback();
     const BOOL started = PlaySoundW(
         path.c_str(),
         nullptr,

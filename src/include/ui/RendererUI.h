@@ -116,7 +116,7 @@ private:
     std::optional<AcousticRun> m_acousticRun;
     std::string m_acousticError;
     std::array<char, 1024> m_acousticDryPath{};
-    char m_acousticOutputPath[1024] = "auralized.wav";
+    char m_acousticStereoPath[1024] = "auralized.wav";
     std::optional<acoustics::StereoAudio> m_acousticWet;
     std::string m_acousticAudioMessage;
     int m_acousticGraphBand = 3;
