@@ -1364,7 +1364,7 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::Spacing();
     }
 
-    const acoustics::Settings settings;
+    auto &settings = m_acousticSettings;
     const auto runSimulation = [&] {
         if (!frame.camera) {
             m_acousticError = "The scene has no listener camera.";
@@ -1411,9 +1411,19 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
 
     if (SectionHeader("Simulation")) {
         ImGui::Indent();
-        ImGui::TextColored(Pal::TextMid, "%s rays per source, %.1f s",
-                           FormatCompact(settings.raysPerSource).c_str(), settings.maxDuration);
         const float buttonWidth = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().IndentSpacing;
+        constexpr uint32_t minRays = 1000;
+        constexpr uint32_t maxRays = 250000;
+        constexpr ImGuiSliderFlags clamp = ImGuiSliderFlags_AlwaysClamp;
+        ImGui::PushItemWidth(buttonWidth * 0.5f);
+        ImGui::SliderScalar("Rays per source", ImGuiDataType_U32, &settings.raysPerSource,
+                            &minRays, &maxRays, "%u", clamp | ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("Max duration (s)", &settings.maxDuration, 0.1f, 5.0f, "%.2f", clamp);
+        float thresholdDb = 10.0f * std::log10(settings.minEnergyFraction);
+        if (ImGui::SliderFloat("Energy threshold (dB)", &thresholdDb, -90.0f, -20.0f, "%.0f", clamp))
+            settings.minEnergyFraction = std::pow(10.0f, thresholdDb / 10.0f);
+        ImGui::PopItemWidth();
+
         if (ImGui::Button("Run Simulation", ImVec2(buttonWidth, 0))) {
             m_acousticRun.reset();
             m_acousticError.clear();
