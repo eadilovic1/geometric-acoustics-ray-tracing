@@ -5,6 +5,7 @@
 
 #include "BistroScene.h"
 #include "CapturePresetScene.h"
+#include "ShoeboxAcousticsScene.h"
 #include "TerrainScene.h"
 
 int main()
@@ -24,6 +25,7 @@ int main()
     CapturePresetScene captureDenseGrid(CapturePresetKind::DenseGrid);
     CapturePresetScene captureMaterialSweep(CapturePresetKind::MaterialSweep);
     CapturePresetScene captureCulling(CapturePresetKind::CullingTest);
+    ShoeboxAcousticsScene shoeboxScene;
 
     bool terrainOk = terrainScene.Setup();
     bool bistroOk = bistroScene.Setup();
@@ -31,6 +33,7 @@ int main()
     bool captureDenseGridOk = captureDenseGrid.Setup();
     bool captureMaterialSweepOk = captureMaterialSweep.Setup();
     bool captureCullingOk = captureCulling.Setup();
+    bool shoeboxOk = shoeboxScene.Setup();
 
     if (!terrainOk)
         spdlog::error("[TestApp] TerrainScene::Setup() failed");
@@ -44,6 +47,8 @@ int main()
         spdlog::error("[TestApp] Capture material sweep setup failed");
     if (!captureCullingOk)
         spdlog::error("[TestApp] Capture culling setup failed");
+    if (!shoeboxOk)
+        spdlog::error("[TestApp] ShoeboxAcousticsScene::Setup() failed");
 
     std::vector<Scene*> scenes;
     if (terrainOk) scenes.push_back(&terrainScene);
@@ -52,6 +57,7 @@ int main()
     if (captureDenseGridOk) scenes.push_back(&captureDenseGrid);
     if (captureMaterialSweepOk) scenes.push_back(&captureMaterialSweep);
     if (captureCullingOk) scenes.push_back(&captureCulling);
+    if (shoeboxOk) scenes.push_back(&shoeboxScene);
 
     for (std::size_t i = 0; i < scenes.size(); ++i)
         spdlog::info("[TestApp] Press {} for {}", i + 1, scenes[i]->GetName());
