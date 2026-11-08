@@ -1,6 +1,9 @@
 #pragma once
 #include <cstddef>
+#include <optional>
+#include <string>
 #include <vector>
+#include "acoustics/AcousticSimulation.h"
 #include "core/IBLDebugMode.h"
 
 class Scene;
@@ -77,6 +80,17 @@ private:
     int m_prevVpW = -1, m_prevVpH = -1;
 
     UITab m_activeTab = UITab::Scene;
+
+    struct AcousticRun {
+        acoustics::Receiver listener;
+        acoustics::Echogram echogram;
+        acoustics::TraceStats stats;
+        std::size_t triangleCount = 0;
+    };
+
+    const Scene *m_acousticScene = nullptr;
+    std::optional<AcousticRun> m_acousticRun;
+    std::string m_acousticError;
 
     // ── Draw helpers ──────────────────────────────────────────────────────────
     void DrawTopbar(int fbWidth,
