@@ -1827,7 +1827,7 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         if (ImGui::Button("Simulate & Play")) {
             try {
                 acoustics::MonoAudio dry;
-                const auto path = std::filesystem::u8path(m_acousticDryPath.data());
+                const auto path = std::filesystem::path(reinterpret_cast<const char8_t *>(m_acousticDryPath.data()));
                 const auto loaded = acoustics::AudioEngine::ReadMonoWav(path, dry);
                 if (loaded.ok) {
                     startSimulation();
@@ -1856,7 +1856,7 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::BeginDisabled(!m_acousticWet || !hasStereoPath);
         if (ImGui::Button("Save to WAV")) {
             try {
-                const auto path = std::filesystem::u8path(m_acousticStereoPath);
+                const auto path = std::filesystem::path(reinterpret_cast<const char8_t *>(m_acousticStereoPath));
                 if (std::filesystem::exists(std::filesystem::symlink_status(path))) {
                     m_acousticAudioMessage = "This path already exists. Choose a new output file.";
                 } else {
@@ -1871,7 +1871,7 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::BeginDisabled(!hasStereoPath);
         if (ImGui::Button("Play Saved WAV")) {
             try {
-                const auto path = std::filesystem::u8path(m_acousticStereoPath);
+                const auto path = std::filesystem::path(reinterpret_cast<const char8_t *>(m_acousticStereoPath));
                 m_acousticAudioMessage = acoustics::AudioEngine::PlayWavFile(path).message;
             } catch (const std::exception &error) {
                 m_acousticAudioMessage = error.what();
