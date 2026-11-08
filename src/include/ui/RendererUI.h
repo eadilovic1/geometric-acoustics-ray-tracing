@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "acoustics/AcousticSimulation.h"
+#include "acoustics/RoomMetrics.h"
 #include "core/IBLDebugMode.h"
 
 class Scene;
@@ -88,6 +89,10 @@ private:
         std::size_t triangleCount = 0;
         acoustics::AirConditions air;
         float speedOfSound = 0.0f;
+        acoustics::RoomMetricsResult metrics;
+        int plottedEchoBand = -1;
+        std::vector<float> leftEchoPeaks;
+        std::vector<float> rightEchoPeaks;
     };
 
     const Scene *m_acousticScene = nullptr;
@@ -96,6 +101,8 @@ private:
     acoustics::Receiver m_acousticReceiver;
     std::optional<AcousticRun> m_acousticRun;
     std::string m_acousticError;
+    int m_acousticGraphBand = 3;
+    int m_acousticGraphKind = 0;
 
     // ── Draw helpers ──────────────────────────────────────────────────────────
     void DrawTopbar(int fbWidth,
@@ -141,6 +148,7 @@ private:
     void DrawTabTerrain(Scene &scene);
 
     void DrawTabAcoustics(Scene &scene, const FrameSubmission &frame);
+    void DrawAcousticGraphs(AcousticRun &run);
 
     void DrawHelpWindow(int fbWidth, int fbHeight);
 };

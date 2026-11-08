@@ -1342,6 +1342,85 @@ void RendererUI::DrawTabTerrain(Scene &scene) {
     scene.OnTerrainTabUI();
 }
 
+static std::vector<float> EchogramPeaks(const std::vector<OctaveBands> &bins, std::size_t band) {
+    constexpr std::size_t maxColumns = 256;
+    const std::size_t columns = std::min(bins.size(), maxColumns);
+    std::vector<float> peaks(columns, 0.0f);
+    for (std::size_t i = 0; i < columns; ++i) {
+        const std::size_t first = i * bins.size() / columns;
+        const std::size_t end = (i + 1) * bins.size() / columns;
+        for (std::size_t bin = first; bin < end; ++bin)
+            peaks[i] = std::max(peaks[i], bins[bin][band]);
+    }
+    return peaks;
+}
+
+void RendererUI::DrawAcousticGraphs(AcousticRun &run) {
+    ImGui::Indent();
+    const float width = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().IndentSpacing;
+    ImGui::PushItemWidth(width * 0.5f);
+    const char *graphKinds[] = {"Echogram", "Schroeder decay"};
+    ImGui::Combo("Graph", &m_acousticGraphKind, graphKinds, IM_ARRAYSIZE(graphKinds));
+
+    char bandLabel[16];
+    std::snprintf(bandLabel, sizeof(bandLabel), "%.0f Hz", OctaveBands::Frequencies[m_acousticGraphBand]);
+    if (ImGui::BeginCombo("Octave band", bandLabel)) {
+        for (int i = 0; i < static_cast<int>(OctaveBands::Count); ++i) {
+            std::snprintf(bandLabel, sizeof(bandLabel), "%.0f Hz", OctaveBands::Frequencies[i]);
+            if (ImGui::Selectable(bandLabel, m_acousticGraphBand == i))
+                m_acousticGraphBand = i;
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PopItemWidth();
+
+    const auto band = static_cast<std::size_t>(m_acousticGraphBand);
+    if (m_acousticGraphKind == 0) {
+        if (run.plottedEchoBand != m_acousticGraphBand) {
+            run.leftEchoPeaks = EchogramPeaks(run.echogram.left, band);
+            run.rightEchoPeaks = EchogramPeaks(run.echogram.right, band);
+            run.plottedEchoBand = m_acousticGraphBand;
+        }
+        float peak = 0.0f;
+        for (const auto *peaks : {&run.leftEchoPeaks, &run.rightEchoPeaks})
+            for (const float energy : *peaks)
+                peak = std::max(peak, energy);
+        if (peak > 0.0f) {
+            ImGui::TextWrapped("Energy per bin. Shared scale 0 to %.3g.", peak);
+            ImGui::TextDisabled("Time from emission (s)");
+            const auto plot = [&](const char *ear, const char *id, const std::vector<float> &peaks) {
+                ImGui::Text("%s    0 to %.3f s", ear, run.echogram.DurationSec());
+                ImGui::PlotHistogram(id, peaks.data(), static_cast<int>(peaks.size()), 0, nullptr,
+                                     0.0f, peak, ImVec2(width, 84));
+            };
+            plot("Left ear", "##leftEcho", run.leftEchoPeaks);
+            plot("Right ear", "##rightEcho", run.rightEchoPeaks);
+        } else {
+            ImGui::TextDisabled("No energy in this band.");
+        }
+    } else {
+        ImGui::TextWrapped("Level from 0 to -80 dB. Time starts at each ear's first arrival.");
+        const auto plot = [&](const char *ear, const char *id, acoustics::BandDecay &decay) {
+            if (!decay.IsValid() || decay.levelDb.size() < 2) {
+                ImGui::TextDisabled("%s    No decay curve", ear);
+                return;
+            }
+            const double seconds = static_cast<double>(decay.levelDb.size() - 1) / run.metrics.sampleRate;
+            ImGui::Text("%s    0 to %.3f s", ear, seconds);
+            const auto level = [](void *data, int index) {
+                const auto &values = *static_cast<const std::vector<double> *>(data);
+                return static_cast<float>(std::clamp(values[index], -80.0, 0.0));
+            };
+            ImGui::PlotLines(id, level, &decay.levelDb, static_cast<int>(decay.levelDb.size()), 0, nullptr,
+                             -80.0f, 0.0f, ImVec2(width, 84));
+        };
+        plot("Left ear", "##leftDecay", run.metrics.left.bands[band].decay);
+        plot("Right ear", "##rightDecay", run.metrics.right.bands[band].decay);
+    }
+    ImGui::Unindent();
+    ImGui::Spacing();
+}
+
 void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
     constexpr float centimetersPerMeter = 100.0f;
     constexpr ImGuiSliderFlags clamp = ImGuiSliderFlags_AlwaysClamp;
@@ -1436,6 +1515,7 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         AcousticRun run{listener, acoustics::Echogram(runSettings.maxDuration), {},
                         geometry.GetTriangleCount(), m_acousticAir, runSettings.speedOfSound};
         run.stats = simulator.Run(sources, run.listener, run.echogram, runSettings);
+        run.metrics = acoustics::RoomMetrics::Compute(run.echogram);
         m_acousticRun = std::move(run);
     };
 
@@ -1477,6 +1557,9 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::Unindent();
         ImGui::Spacing();
     }
+
+    if (m_acousticRun && SectionHeader("Acoustic Graphs"))
+        DrawAcousticGraphs(*m_acousticRun);
 
     if (m_acousticRun && SectionHeader("Last Simulation")) {
         const AcousticRun &run = *m_acousticRun;
