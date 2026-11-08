@@ -15,6 +15,8 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <exception>
+#include <utility>
 
 // Pal colours and SectionHeader are now in UITheme.h (shared with scene tabs).
 
@@ -248,6 +250,12 @@ void RendererUI::Draw(int fbW, int fbH,
                       std::size_t &activeSceneIndex) {
     const bool lookMode = mouse && mouse->IsCaptured();
     const RendererDebugStats &stats = renderer.GetDebugStats();
+
+    if (m_acousticScene != &scene) {
+        m_acousticScene = &scene;
+        m_acousticRun.reset();
+        m_acousticError.clear();
+    }
 
     // ── Viewport fills the entire window ─────────────────────────────────────
     m_vpX = 0;
@@ -1335,24 +1343,110 @@ void RendererUI::DrawTabTerrain(Scene &scene) {
 }
 
 void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
-    if (!SectionHeader("Scene Inputs"))
-        return;
+    const int enabledLights = frame.lights.ActiveLightCount();
+    acoustics::Receiver listener;
+    if (frame.camera)
+        listener.FollowCamera(*frame.camera);
 
-    ImGui::Indent();
-    ImGui::PushStyleColor(ImGuiCol_Text, Pal::TextMid);
-    ImGui::TextWrapped("Scene: %s", scene.GetName().c_str());
-    ImGui::Text("Enabled lights: %d", frame.lights.ActiveLightCount());
-    if (frame.camera) {
-        acoustics::Receiver receiver;
-        receiver.FollowCamera(*frame.camera);
-        const auto &position = receiver.headCenter;
-        ImGui::Text("Listener: %.2f, %.2f, %.2f m", position.x, position.y, position.z);
-    } else {
-        ImGui::TextColored(Pal::TextDim, "No camera for the listener.");
+    if (SectionHeader("Scene Inputs")) {
+        ImGui::Indent();
+        ImGui::PushStyleColor(ImGuiCol_Text, Pal::TextMid);
+        ImGui::TextWrapped("Scene: %s", scene.GetName().c_str());
+        ImGui::Text("Enabled lights: %d", enabledLights);
+        if (frame.camera) {
+            const auto &position = listener.headCenter;
+            ImGui::Text("Listener: %.2f, %.2f, %.2f m", position.x, position.y, position.z);
+        } else {
+            ImGui::TextColored(Pal::TextDim, "No camera for the listener.");
+        }
+        ImGui::PopStyleColor();
+        ImGui::Unindent();
+        ImGui::Spacing();
     }
-    ImGui::PopStyleColor();
-    ImGui::Unindent();
-    ImGui::Spacing();
+
+    const acoustics::Settings settings;
+    const auto runSimulation = [&] {
+        if (!frame.camera) {
+            m_acousticError = "The scene has no listener camera.";
+            return;
+        }
+        if (enabledLights == 0) {
+            m_acousticError = "Enable a scene light to use it as a sound source.";
+            return;
+        }
+
+        AcousticSceneGeometry geometry;
+        geometry.ExtractFromScene(scene);
+        if (geometry.IsEmpty()) {
+            m_acousticError = "This scene has no CPU mesh triangles for acoustic simulation.";
+            return;
+        }
+
+        const AABB &bounds = geometry.GetBounds();
+        const glm::vec3 center = (bounds.min + bounds.max) * 0.5f;
+        const float radius = glm::length(bounds.max - bounds.min) * 0.5f;
+        auto sources = acoustics::FromLights(frame.lights, center, radius);
+        std::erase_if(sources, [](const acoustics::Source &source) {
+            const float power = source.power.Average();
+            return !std::isfinite(power) || power <= 0.0f;
+        });
+        if (sources.empty()) {
+            m_acousticError = "Set a positive intensity on an enabled scene light.";
+            return;
+        }
+
+        // Start the directional wavefront on the incoming side of the scene bounds.
+        for (auto &source : sources) {
+            if (source.pattern == acoustics::Source::Pattern::Parallel)
+                source.position -= source.direction * (source.emitterRadius + settings.rayOffset);
+        }
+
+        BVH bvh;
+        bvh.Build(geometry);
+        const acoustics::Simulator simulator(bvh, AcousticMaterialLibrary::Instance());
+        AcousticRun run{listener, acoustics::Echogram(settings.maxDuration), {}, geometry.GetTriangleCount()};
+        run.stats = simulator.Run(sources, run.listener, run.echogram, settings);
+        m_acousticRun = std::move(run);
+    };
+
+    if (SectionHeader("Simulation")) {
+        ImGui::Indent();
+        ImGui::TextColored(Pal::TextMid, "%s rays per source, %.1f s",
+                           FormatCompact(settings.raysPerSource).c_str(), settings.maxDuration);
+        const float buttonWidth = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().IndentSpacing;
+        if (ImGui::Button("Run Simulation", ImVec2(buttonWidth, 0))) {
+            m_acousticRun.reset();
+            m_acousticError.clear();
+            try {
+                runSimulation();
+            } catch (const std::exception &error) {
+                m_acousticError = error.what();
+            }
+        }
+        if (!m_acousticError.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, Pal::Orange);
+            ImGui::TextWrapped("%s", m_acousticError.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::Unindent();
+        ImGui::Spacing();
+    }
+
+    if (m_acousticRun && SectionHeader("Last Simulation")) {
+        const AcousticRun &run = *m_acousticRun;
+        const auto &position = run.listener.headCenter;
+        ImGui::Indent();
+        ImGui::PushStyleColor(ImGuiCol_Text, Pal::TextMid);
+        ImGui::Text("Triangles: %s", FormatCompact(run.triangleCount).c_str());
+        ImGui::Text("Rays: %s    Ear hits: %s",
+                    FormatCompact(run.stats.emitted).c_str(), FormatCompact(run.stats.earHits).c_str());
+        ImGui::Text("Segments: %s", FormatCompact(run.stats.segments).c_str());
+        ImGui::Text("Echogram: %s bins at %.0f Hz",
+                    FormatCompact(run.echogram.BinCount()).c_str(), run.echogram.sampleRate);
+        ImGui::Text("Listener at run: %.2f, %.2f, %.2f m", position.x, position.y, position.z);
+        ImGui::PopStyleColor();
+        ImGui::Unindent();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
