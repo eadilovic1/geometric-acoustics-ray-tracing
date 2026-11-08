@@ -1,6 +1,7 @@
 #include "ui/RendererUI.h"
 #include "ui/UITheme.h"
 
+#include "acoustics/AcousticSimulation.h"
 #include "core/Camera.h"
 #include "core/Renderer.h"
 #include "core/MouseInput.h"
@@ -21,8 +22,22 @@ static constexpr float kPanelPadding = 12.0f;
 static constexpr float kRounding = 10.0f;
 static constexpr float kTopbarHeight = 44.0f;
 static constexpr float kSidebarWidth = 360.0f;
-static constexpr int kTabCount = 6;        ///< Base tabs, always visible
-static const char *kTabLabels[] = {"Scene", "Lights", "Mat", "Shadow", "Post", "Stats", "Terr"};
+
+struct InspectorTab {
+    UITab id;
+    const char *label;
+};
+
+static constexpr InspectorTab kInspectorTabs[] = {
+    {UITab::Scene, "Scene"},
+    {UITab::Lights, "Lights"},
+    {UITab::Materials, "Mat"},
+    {UITab::Shadow, "Shadow"},
+    {UITab::PostFX, "Post"},
+    {UITab::Stats, "Stats"},
+    {UITab::Acoustics, "Acoustics"},
+    {UITab::Terrain, "Terr"},
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ApplyTheme — call once after ImGui::CreateContext(), NOT inside a frame.
@@ -426,19 +441,27 @@ void RendererUI::DrawSidebar(int fbH,
 
     if (ImGui::Begin("##Inspector", nullptr, flags)) {
         // --- Pill-style tab bar ---
-        // The Terrain tab is appended only when the active scene supports it.
         const bool hasTerrain = scene.HasTerrainTab();
         if (!hasTerrain && m_activeTab == UITab::Terrain)
             m_activeTab = UITab::Scene;
-        const int visibleTabCount = kTabCount + (hasTerrain ? 1 : 0);
 
+        constexpr int tabsPerRow = 4;
+        constexpr float tabHeight = 30.0f;
+        constexpr float tabBarWidth = kSidebarWidth - 32.0f;
+        constexpr float tabWidth = tabBarWidth / tabsPerRow;
         ImGui::SetCursorPos({16, 16});
-        ImGui::BeginChild("##tabBar", ImVec2(kSidebarWidth - 32, 36),
+        ImGui::BeginChild("##tabBar", ImVec2(tabBarWidth, 2 * tabHeight + 6),
                           false, ImGuiWindowFlags_NoScrollbar);
 
-        const float tabW = (kSidebarWidth - 32) / static_cast<float>(visibleTabCount);
-        for (int i = 0; i < visibleTabCount; ++i) {
-            const bool active = (static_cast<int>(m_activeTab) == i);
+        int visibleIndex = 0;
+        for (const auto &tab : kInspectorTabs) {
+            if (tab.id == UITab::Terrain && !hasTerrain)
+                continue;
+            if (visibleIndex % tabsPerRow != 0)
+                ImGui::SameLine(0, 0);
+            ++visibleIndex;
+
+            const bool active = m_activeTab == tab.id;
             ImGui::PushStyleColor(ImGuiCol_Button, active
                                                        ? Pal::Accent
                                                        : ImVec4(0, 0, 0, 0));
@@ -452,12 +475,11 @@ void RendererUI::DrawSidebar(int fbH,
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 18.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
 
-            if (ImGui::Button(kTabLabels[i], ImVec2(tabW, 30)))
-                m_activeTab = static_cast<UITab>(i);
+            if (ImGui::Button(tab.label, ImVec2(tabWidth, tabHeight)))
+                m_activeTab = tab.id;
 
             ImGui::PopStyleVar(2);
             ImGui::PopStyleColor(4);
-            if (i < visibleTabCount - 1) ImGui::SameLine(0, 0);
         }
         ImGui::EndChild();
 
@@ -466,7 +488,7 @@ void RendererUI::DrawSidebar(int fbH,
         // --- Scrollable content area ---
         // For the terrain tab we reserve a fixed strip at the bottom for the
         // sticky Regenerate bar so it is always visible without scrolling.
-        const bool hasTerrainFooter = (m_activeTab == UITab::Terrain) && scene.HasTerrainTab();
+        const bool hasTerrainFooter = (m_activeTab == UITab::Terrain) && hasTerrain;
         constexpr float kFooterH = 68.0f;
 
         ImGui::SetCursorPosX(0);
@@ -482,6 +504,7 @@ void RendererUI::DrawSidebar(int fbH,
             case UITab::PostFX:    DrawTabPostFX(scene, stats);          break;
             case UITab::Stats:     DrawTabStats(scene, stats);           break;
             case UITab::Terrain:   DrawTabTerrain(scene);                break;
+            case UITab::Acoustics: DrawTabAcoustics(scene, frame);       break;
         }
 
         if (lookMode) {
@@ -1309,6 +1332,27 @@ void RendererUI::DrawTabStats(Scene & /*scene*/, const RendererDebugStats &stats
 // ─────────────────────────────────────────────────────────────────────────────
 void RendererUI::DrawTabTerrain(Scene &scene) {
     scene.OnTerrainTabUI();
+}
+
+void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
+    if (!SectionHeader("Scene Inputs"))
+        return;
+
+    ImGui::Indent();
+    ImGui::PushStyleColor(ImGuiCol_Text, Pal::TextMid);
+    ImGui::TextWrapped("Scene: %s", scene.GetName().c_str());
+    ImGui::Text("Enabled lights: %d", frame.lights.ActiveLightCount());
+    if (frame.camera) {
+        acoustics::Receiver receiver;
+        receiver.FollowCamera(*frame.camera);
+        const auto &position = receiver.headCenter;
+        ImGui::Text("Listener: %.2f, %.2f, %.2f m", position.x, position.y, position.z);
+    } else {
+        ImGui::TextColored(Pal::TextDim, "No camera for the listener.");
+    }
+    ImGui::PopStyleColor();
+    ImGui::Unindent();
+    ImGui::Spacing();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
