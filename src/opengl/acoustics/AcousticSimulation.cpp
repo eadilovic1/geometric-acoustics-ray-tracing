@@ -294,9 +294,11 @@ std::vector<Source> FromLights(
 ) {
     std::vector<Source> result;
 
-    const auto& directional = lights.GetDirectionalLight();
-    if (directional.enabled) {
-        result.push_back(FromLight(directional, directionalOrigin, directionalBeamRadius));
+    if (lights.HasDirectionalLight()) {
+        const auto& directional = lights.GetDirectionalLight();
+        if (directional.enabled) {
+            result.push_back(FromLight(directional, directionalOrigin, directionalBeamRadius));
+        }
     }
 
     for (const auto& light : lights.GetPointLights()) {
