@@ -9,7 +9,7 @@ class MouseInput;
 struct RendererDebugStats;
 struct FrameSubmission;
 
-/// Sidebar tab indices — keep in sync with kTabLabels in RendererUI.cpp.
+/// Sidebar tab identifiers used by the Inspector.
 enum class UITab : int {
     Scene = 0,
     Lights = 1,
@@ -18,6 +18,7 @@ enum class UITab : int {
     PostFX = 4,
     Stats = 5,
     Terrain = 6,  ///< Only shown when the active scene returns HasTerrainTab() == true
+    Acoustics = 7,
 };
 
 class RendererUI {
@@ -119,6 +120,8 @@ private:
     void DrawTabStats(Scene &scene, const RendererDebugStats &stats);
 
     void DrawTabTerrain(Scene &scene);
+
+    void DrawTabAcoustics(Scene &scene, const FrameSubmission &frame);
 
     void DrawHelpWindow(int fbWidth, int fbHeight);
 };
