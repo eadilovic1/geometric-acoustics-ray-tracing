@@ -140,6 +140,10 @@ public:
 
     [[nodiscard]] static PlaybackResult PlayWavFile(const std::filesystem::path& path);
 
+    /// Preview stereo audio asynchronously on the application's UI thread.
+    [[nodiscard]] static PlaybackResult PlayStereo(const StereoAudio& audio);
+    static void StopPlayback();
+
     /// Sinteticki ehogram + kratki sinus, bez vezivanja za korake 1-4.
     /// playAudio pokrece audio reprodukciju samo kada je eksplicitno trazeno.
     [[nodiscard]] static DemoOutput RunSyntheticDemo(

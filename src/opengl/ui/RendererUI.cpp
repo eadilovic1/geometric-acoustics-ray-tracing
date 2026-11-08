@@ -255,6 +255,7 @@ void RendererUI::Draw(int fbW, int fbH,
         m_acousticScene = &scene;
         m_acousticRun.reset();
         m_acousticError.clear();
+        ResetAcousticAudio();
     }
 
     // ── Viewport fills the entire window ─────────────────────────────────────
@@ -1492,6 +1493,36 @@ void RendererUI::DrawAcousticMetrics(const AcousticRun &run) {
     ImGui::Spacing();
 }
 
+void RendererUI::ResetAcousticAudio() {
+    if (m_acousticWet)
+        acoustics::AudioEngine::StopPlayback();
+    m_acousticWet.reset();
+    m_acousticAudioMessage.clear();
+}
+
+void RendererUI::PlayAcousticResponse(const acoustics::MonoAudio &dry) {
+    if (!m_acousticRun) {
+        m_acousticAudioMessage = m_acousticError;
+        return;
+    }
+    if (m_acousticRun->stats.earHits == 0) {
+        m_acousticAudioMessage = "No rays reached either ear. Increase the ray count or adjust the listener.";
+        return;
+    }
+    const auto impulse = acoustics::AudioEngine::SynthesizeImpulseResponse(m_acousticRun->echogram);
+    if (!impulse.ok) {
+        m_acousticAudioMessage = impulse.message;
+        return;
+    }
+    auto wet = acoustics::AudioEngine::Convolve(dry, impulse.audio);
+    if (!wet.ok) {
+        m_acousticAudioMessage = wet.message;
+        return;
+    }
+    m_acousticWet = std::move(wet.audio);
+    m_acousticAudioMessage = acoustics::AudioEngine::PlayStereo(*m_acousticWet).message;
+}
+
 void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
     constexpr float centimetersPerMeter = 100.0f;
     constexpr ImGuiSliderFlags clamp = ImGuiSliderFlags_AlwaysClamp;
@@ -1598,6 +1629,16 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         }
         m_acousticRun = std::move(run);
     };
+    const auto startSimulation = [&] {
+        ResetAcousticAudio();
+        m_acousticRun.reset();
+        m_acousticError.clear();
+        try {
+            runSimulation();
+        } catch (const std::exception &error) {
+            m_acousticError = error.what();
+        }
+    };
 
     if (SectionHeader("Simulation")) {
         ImGui::Indent();
@@ -1620,20 +1661,66 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::PopItemWidth();
         ImGui::TextColored(Pal::TextMid, "Air pressure: 101.325 kPa (fixed)");
 
-        if (ImGui::Button("Run Simulation", ImVec2(buttonWidth, 0))) {
-            m_acousticRun.reset();
-            m_acousticError.clear();
-            try {
-                runSimulation();
-            } catch (const std::exception &error) {
-                m_acousticError = error.what();
-            }
-        }
+        if (ImGui::Button("Run Simulation", ImVec2(buttonWidth, 0)))
+            startSimulation();
         if (!m_acousticError.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, Pal::Orange);
             ImGui::TextWrapped("%s", m_acousticError.c_str());
             ImGui::PopStyleColor();
         }
+        ImGui::Unindent();
+        ImGui::Spacing();
+    }
+
+    if (SectionHeader("Auralization")) {
+        ImGui::Indent();
+        const float width = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().IndentSpacing;
+        ImGui::TextUnformatted("Dry WAV path (mono PCM16 or float32)");
+        ImGui::SetNextItemWidth(width);
+        if (ImGui::InputText("##dryWavPath", m_acousticDryPath.data(), m_acousticDryPath.size()))
+            ResetAcousticAudio();
+        ImGui::BeginDisabled(m_acousticDryPath.front() == '\0');
+        if (ImGui::Button("Simulate & Play")) {
+            try {
+                acoustics::MonoAudio dry;
+                const auto path = std::filesystem::u8path(m_acousticDryPath.data());
+                const auto loaded = acoustics::AudioEngine::ReadMonoWav(path, dry);
+                if (loaded.ok) {
+                    startSimulation();
+                    PlayAcousticResponse(dry);
+                } else {
+                    m_acousticAudioMessage = loaded.message;
+                }
+            } catch (const std::exception &error) {
+                m_acousticAudioMessage = error.what();
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!m_acousticWet);
+        if (ImGui::Button("Stop Preview"))
+            acoustics::AudioEngine::StopPlayback();
+        ImGui::EndDisabled();
+
+        ImGui::TextUnformatted("Stereo output path");
+        ImGui::SetNextItemWidth(width);
+        ImGui::InputText("##outputWavPath", m_acousticOutputPath, sizeof(m_acousticOutputPath));
+        ImGui::BeginDisabled(!m_acousticWet || m_acousticOutputPath[0] == '\0');
+        if (ImGui::Button("Save to WAV")) {
+            try {
+                const auto path = std::filesystem::u8path(m_acousticOutputPath);
+                if (std::filesystem::exists(std::filesystem::symlink_status(path))) {
+                    m_acousticAudioMessage = "This path already exists. Choose a new output file.";
+                } else {
+                    m_acousticAudioMessage = acoustics::AudioEngine::WriteStereoWav(path, *m_acousticWet).message;
+                }
+            } catch (const std::exception &error) {
+                m_acousticAudioMessage = error.what();
+            }
+        }
+        ImGui::EndDisabled();
+        if (!m_acousticAudioMessage.empty())
+            ImGui::TextWrapped("%s", m_acousticAudioMessage.c_str());
         ImGui::Unindent();
         ImGui::Spacing();
     }

@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "acoustics/AcousticSimulation.h"
+#include "acoustics/AudioEngine.h"
 #include "acoustics/RoomMetrics.h"
 #include "core/IBLDebugMode.h"
 
@@ -105,6 +106,10 @@ private:
     acoustics::Receiver m_acousticReceiver;
     std::optional<AcousticRun> m_acousticRun;
     std::string m_acousticError;
+    std::array<char, 1024> m_acousticDryPath{};
+    char m_acousticOutputPath[1024] = "auralized.wav";
+    std::optional<acoustics::StereoAudio> m_acousticWet;
+    std::string m_acousticAudioMessage;
     int m_acousticGraphBand = 3;
     int m_acousticGraphKind = 0;
     int m_acousticMetricEar = 0;
@@ -156,6 +161,8 @@ private:
     void DrawTabAcoustics(Scene &scene, const FrameSubmission &frame);
     void DrawAcousticGraphs(AcousticRun &run);
     void DrawAcousticMetrics(const AcousticRun &run);
+    void ResetAcousticAudio();
+    void PlayAcousticResponse(const acoustics::MonoAudio &dry);
 
     void DrawHelpWindow(int fbWidth, int fbHeight);
 };
