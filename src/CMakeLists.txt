@@ -130,6 +130,9 @@ add_executable(AcousticsValidationTests
     opengl/acoustics/AcousticsValidationTests.cpp
 )
 target_link_libraries(AcousticsValidationTests PRIVATE ${PROJECT_NAME})
+target_compile_definitions(AcousticsValidationTests PRIVATE
+    PRS_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../assets"
+)
 
 add_executable(AuralizationDemo
     opengl/acoustics/AuralizationDemo.cpp
