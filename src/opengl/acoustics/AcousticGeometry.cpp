@@ -1,8 +1,7 @@
 #include "acoustics/AcousticGeometry.h"
 #include "core/Mesh.h"
 #include "scene/Scene.h"
-#include "scene/RenderItem.h"
-#include <glm/gtc/matrix_transform.hpp>
+#include "scene/VisibilityCulling.h"
 #include <cmath>
 #include <algorithm>
 #include <spdlog/spdlog.h>
@@ -161,22 +160,46 @@ void AcousticSceneGeometry::AddMesh(const std::vector<glm::vec3>& positions,
     }
 }
 
+namespace {
+
+void AddSubMeshTriangles(AcousticSceneGeometry& geometry, const Mesh& mesh, const SubMesh& subMesh,
+                         const glm::mat4& transform, uint32_t materialId) {
+    const auto& vertices = mesh.GetCpuVertices();
+    const auto& indices = mesh.GetCpuIndices();
+    const size_t firstIndex = subMesh.indexByteOffset / sizeof(uint32_t);
+    if (subMesh.indexByteOffset % sizeof(uint32_t) != 0 || firstIndex > indices.size()
+        || subMesh.indexCount > indices.size() - firstIndex) {
+        return;
+    }
+
+    const auto worldPosition = [&](int64_t index) {
+        return glm::vec3(transform * glm::vec4(vertices[static_cast<size_t>(index)].position, 1.0f));
+    };
+    const int64_t vertexCount = static_cast<int64_t>(vertices.size());
+    const int64_t baseVertex = subMesh.baseVertex;
+    const size_t endIndex = firstIndex + subMesh.indexCount;
+    for (size_t i = firstIndex; i + 2 < endIndex; i += 3) {
+        const int64_t idx0 = baseVertex + indices[i];
+        const int64_t idx1 = baseVertex + indices[i + 1];
+        const int64_t idx2 = baseVertex + indices[i + 2];
+        if (idx0 < 0 || idx1 < 0 || idx2 < 0 || idx0 >= vertexCount || idx1 >= vertexCount || idx2 >= vertexCount) {
+            continue;
+        }
+        geometry.AddTriangle(worldPosition(idx0), worldPosition(idx1), worldPosition(idx2), materialId);
+    }
+}
+
+} // namespace
+
 bool AcousticSceneGeometry::AddMesh(const Mesh& mesh, const glm::mat4& transform, uint32_t defaultMaterialId) {
     if (!mesh.HasCpuGeometry()) {
         spdlog::warn("[AcousticGeometry] Mesh '{}' has no CPU geometry stored", mesh.GetName());
         return false;
     }
 
-    const auto& vertices = mesh.GetCpuVertices();
-    const auto& indices = mesh.GetCpuIndices();
-
-    std::vector<glm::vec3> positions;
-    positions.reserve(vertices.size());
-    for (const auto& v : vertices) {
-        positions.push_back(v.position);
+    for (uint32_t i = 0; i < mesh.SubMeshCount(); ++i) {
+        AddSubMeshTriangles(*this, mesh, mesh.GetSubMesh(i), transform, defaultMaterialId);
     }
-
-    AddMesh(positions, indices, transform, defaultMaterialId);
     return true;
 }
 
@@ -186,15 +209,13 @@ void AcousticSceneGeometry::ExtractFromScene(const Scene& scene, uint32_t defaul
     spdlog::info("[AcousticGeometry] Extracting geometry from scene: {} objects", objects.size());
 
     for (const auto& item : objects) {
-        glm::mat4 modelMat = item.transform.GetModelMatrix();
-        const glm::mat4 offsetMat = glm::translate(glm::mat4(1.0f), item.translationOffset) * glm::mat4_cast(item.rotationOffset);
-        const glm::mat4 worldMat = modelMat * offsetMat;
+        if (!item.meshMulti || item.subMeshIndex >= item.meshMulti->SubMeshCount()) {
+            continue;
+        }
 
         const uint32_t matId = (item.acousticMaterialId != 0) ? item.acousticMaterialId : defaultMaterialId;
-
-        if (item.meshMulti) {
-            AddMesh(*item.meshMulti, worldMat, matId);
-        }
+        const SubMesh& subMesh = item.meshMulti->GetSubMesh(item.subMeshIndex);
+        AddSubMeshTriangles(*this, *item.meshMulti, subMesh, BuildRenderItemModelMatrix(item), matId);
     }
 
     Finalize();
