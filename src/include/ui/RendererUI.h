@@ -1,15 +1,24 @@
 #pragma once
+#include <array>
 #include <cstddef>
+#include <memory>
+#include <optional>
+#include <string>
 #include <vector>
+#include "acoustics/AcousticSimulation.h"
+#include "acoustics/AudioEngine.h"
+#include "acoustics/RoomMetrics.h"
 #include "core/IBLDebugMode.h"
 
 class Scene;
+class MeshBuffer;
 class Renderer;
 class MouseInput;
+class ShaderProgram;
 struct RendererDebugStats;
 struct FrameSubmission;
 
-/// Sidebar tab indices — keep in sync with kTabLabels in RendererUI.cpp.
+/// Sidebar tab identifiers used by the Inspector.
 enum class UITab : int {
     Scene = 0,
     Lights = 1,
@@ -18,11 +27,13 @@ enum class UITab : int {
     PostFX = 4,
     Stats = 5,
     Terrain = 6,  ///< Only shown when the active scene returns HasTerrainTab() == true
+    Acoustics = 7,
 };
 
 class RendererUI {
 public:
-    RendererUI() = default;
+    RendererUI();
+    ~RendererUI();
 
     /// Apply the global ImGui theme. Call once after ImGui::CreateContext(),
     /// or whenever you want to re-apply (e.g. after a style reset).
@@ -36,6 +47,9 @@ public:
               MouseInput *mouse,
               const std::vector<Scene *> &scenes,
               std::size_t &activeSceneIndex);
+
+    /// Draw the last simulation's debug geometry into the current scene framebuffer.
+    void DrawAcousticDebug(const Scene &scene);
 
     /// Returns the viewport rectangle [x, y, w, h] in framebuffer pixels.
     /// Forward this to Renderer::Resize() / SetViewport() every frame.
@@ -76,6 +90,44 @@ private:
     int m_prevVpW = -1, m_prevVpH = -1;
 
     UITab m_activeTab = UITab::Scene;
+
+    struct AcousticRun {
+        acoustics::Receiver listener;
+        acoustics::Echogram echogram;
+        acoustics::TraceStats stats;
+        std::size_t triangleCount = 0;
+        acoustics::AirConditions air;
+        float speedOfSound = 0.0f;
+        acoustics::RoomMetricsResult metrics;
+        float enclosedVolume = 0.0f;
+        std::array<float, OctaveBands::Count> sabineRt60{};
+        std::array<float, OctaveBands::Count> eyringRt60{};
+        int plottedEchoBand = -1;
+        std::vector<float> leftEchoPeaks;
+        std::vector<float> rightEchoPeaks;
+        std::vector<acoustics::RayDebugSegment> debugSegments;
+        std::unique_ptr<MeshBuffer> debugRayMesh;
+    };
+
+    const Scene *m_acousticScene = nullptr;
+    acoustics::Settings m_acousticSettings;
+    acoustics::AirConditions m_acousticAir;
+    acoustics::Receiver m_acousticReceiver;
+    std::optional<AcousticRun> m_acousticRun;
+    std::string m_acousticError;
+    std::array<char, 1024> m_acousticDryPath{};
+    char m_acousticStereoPath[1024] = "auralized.wav";
+    std::optional<acoustics::StereoAudio> m_acousticWet;
+    std::string m_acousticAudioMessage;
+    int m_acousticGraphBand = 3;
+    int m_acousticGraphKind = 0;
+    int m_acousticMetricEar = 0;
+    int m_acousticRt60Fit = 0;
+    bool m_showAcousticRays = false;
+    bool m_showAcousticReceiver = false;
+    uint32_t m_acousticDisplayedBounces = 5;
+    std::unique_ptr<ShaderProgram> m_acousticDebugShader;
+    std::unique_ptr<MeshBuffer> m_acousticDebugSphere;
 
     // ── Draw helpers ──────────────────────────────────────────────────────────
     void DrawTopbar(int fbWidth,
@@ -119,6 +171,12 @@ private:
     void DrawTabStats(Scene &scene, const RendererDebugStats &stats);
 
     void DrawTabTerrain(Scene &scene);
+
+    void DrawTabAcoustics(Scene &scene, const FrameSubmission &frame);
+    void DrawAcousticGraphs(AcousticRun &run);
+    void DrawAcousticMetrics(const AcousticRun &run);
+    void ResetAcousticAudio();
+    void PlayAcousticResponse(const acoustics::MonoAudio &dry);
 
     void DrawHelpWindow(int fbWidth, int fbHeight);
 };

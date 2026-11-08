@@ -6,6 +6,8 @@
 #include <exception>
 #include <fstream>
 #include <limits>
+#include <sstream>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -259,7 +261,15 @@ WavIoStatus AudioEngine::ReadMonoWav(const std::filesystem::path& path, MonoAudi
     return status;
 }
 
-WavIoStatus AudioEngine::WriteStereoWav(const std::filesystem::path& path, const StereoAudio& audio) {
+namespace {
+
+struct StereoWavFormat {
+    std::size_t frames = 0;
+    std::uint32_t sampleRate = 0;
+    float gain = 1.0f;
+};
+
+WavIoStatus PrepareStereoWav(const StereoAudio& audio, StereoWavFormat& format) {
     WavIoStatus status;
     if (!(audio.sampleRate > 0.0f) || !std::isfinite(audio.sampleRate)) {
         status.message = "Frekvencija stereo signala nije ispravna.";
@@ -289,23 +299,15 @@ WavIoStatus AudioEngine::WriteStereoWav(const std::filesystem::path& path, const
         return status;
     }
 
-    if (!path.parent_path().empty()) {
-        std::error_code error;
-        std::filesystem::create_directories(path.parent_path(), error);
-        if (error) {
-            status.message = "Izlazni direktorij se ne moze kreirati.";
-            return status;
-        }
-    }
+    format = {frames, static_cast<std::uint32_t>(roundedRate), gain};
+    return {true, peak > kSafePeak
+        ? "Stereo WAV je snimljen uz zajednicko slabljenje kanala."
+        : "Stereo WAV je snimljen."};
+}
 
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output) {
-        status.message = "WAV datoteka se ne moze kreirati.";
-        return status;
-    }
-
+void WriteStereoPcm16(std::ostream& output, const StereoAudio& audio, const StereoWavFormat& format) {
+    const auto [frames, sampleRate, gain] = format;
     const std::uint32_t dataBytes = static_cast<std::uint32_t>(frames * 4u);
-    const std::uint32_t sampleRate = static_cast<std::uint32_t>(roundedRate);
     output.write("RIFF", 4);
     WriteU32(output, 36u + dataBytes);
     output.write("WAVE", 4);
@@ -329,16 +331,73 @@ WavIoStatus AudioEngine::WriteStereoWav(const std::filesystem::path& path, const
         WriteU16(output, static_cast<std::uint16_t>(rightPcm));
     }
 
-    if (!output.good()) {
-        status.message = "Pisanje WAV datoteke nije uspjelo.";
-        return status;
+}
+
+#if defined(_WIN32)
+std::string& PlayingWavBytes() {
+    struct PlaybackBuffer {
+        std::string bytes;
+
+        ~PlaybackBuffer() {
+            if (!bytes.empty()) PlaySoundW(nullptr, nullptr, 0);
+        }
+    };
+    static PlaybackBuffer buffer;
+    return buffer.bytes;
+}
+#endif
+
+} // namespace
+
+WavIoStatus AudioEngine::WriteStereoWav(const std::filesystem::path& path, const StereoAudio& audio) {
+    StereoWavFormat format;
+    const auto status = PrepareStereoWav(audio, format);
+    if (!status.ok) return status;
+
+    if (!path.parent_path().empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error) return {false, "Izlazni direktorij se ne moze kreirati."};
     }
 
-    status.ok = true;
-    status.message = peak > kSafePeak
-        ? "Stereo WAV je snimljen uz zajednicko slabljenje kanala."
-        : "Stereo WAV je snimljen.";
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) return {false, "WAV datoteka se ne moze kreirati."};
+    WriteStereoPcm16(output, audio, format);
+    output.close();
+    if (!output) return {false, "Pisanje WAV datoteke nije uspjelo."};
     return status;
+}
+
+PlaybackResult AudioEngine::PlayStereo(const StereoAudio& audio) {
+#if defined(_WIN32)
+    StereoWavFormat format;
+    const auto status = PrepareStereoWav(audio, format);
+    if (!status.ok) return {PlaybackStatus::Failed, status.message};
+
+    std::ostringstream output(std::ios::binary);
+    WriteStereoPcm16(output, audio, format);
+    if (!output) return {PlaybackStatus::Failed, "Priprema WAV reprodukcije nije uspjela."};
+
+    // WinMM retains the memory until playback has ended or been stopped.
+    StopPlayback();
+    auto& bytes = PlayingWavBytes();
+    if (!bytes.empty()) return {PlaybackStatus::Failed, "Prethodna reprodukcija se ne moze zaustaviti."};
+    bytes = std::move(output).str();
+    if (!PlaySoundW(reinterpret_cast<LPCWSTR>(bytes.data()), nullptr,
+                    SND_MEMORY | SND_ASYNC | SND_NODEFAULT)) {
+        bytes.clear();
+        return {PlaybackStatus::Failed, "WinMM nije uspio pokrenuti reprodukciju."};
+    }
+    return {PlaybackStatus::Played, "Stereo preview started."};
+#else
+    return {PlaybackStatus::Unavailable, "Audio preview is available on Windows."};
+#endif
+}
+
+void AudioEngine::StopPlayback() {
+#if defined(_WIN32)
+    if (PlaySoundW(nullptr, nullptr, 0)) PlayingWavBytes().clear();
+#endif
 }
 
 PlaybackResult AudioEngine::PlayWavFile(const std::filesystem::path& path) {
@@ -355,6 +414,7 @@ PlaybackResult AudioEngine::PlayWavFile(const std::filesystem::path& path) {
         return result;
     }
 
+    StopPlayback();
     const BOOL started = PlaySoundW(
         path.c_str(),
         nullptr,

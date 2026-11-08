@@ -159,6 +159,16 @@ struct Echogram {
 // DIO 3: Postavke simulacije
 // ===========================================================================
 
+struct AirConditions {
+    static constexpr float MinTemperatureC = -20.0f;
+    static constexpr float MaxTemperatureC = 50.0f;
+    static constexpr float MinRelativeHumidityPercent = 10.0f;
+    static constexpr float MaxRelativeHumidityPercent = 100.0f;
+
+    float temperatureC = 20.0f;
+    float relativeHumidityPercent = 50.0f;
+};
+
 struct Settings {
     uint32_t raysPerSource = 50000;
 
@@ -178,8 +188,7 @@ struct Settings {
 
     float rayOffset = 0.001f;
 
-    /// ISO 9613-1 standardni koeficijenti slabljenja energije u zraku (20°C, 50% RH) [1/m]
-    /// za frekvencije {125, 250, 500, 1000, 2000, 4000, 8000} Hz
+    /// Default energy attenuation coefficients [1/m] at the octave center frequencies.
     OctaveBands airAbsorption{
         0.00003f,
         0.00009f,
@@ -191,6 +200,9 @@ struct Settings {
     };
 
     uint32_t randomSeed = 42;
+
+    /// Set sound speed and octave-band energy attenuation at 101.325 kPa.
+    void SetAirConditions(const AirConditions& air);
 };
 
 
@@ -211,6 +223,13 @@ struct TraceStats {
     uint64_t russianRouletteKills = 0;
 };
 
+/// One world-space segment of a captured ray path.
+struct RayDebugSegment {
+    glm::vec3 start{0.0f};
+    glm::vec3 end{0.0f};
+    uint32_t bounceCount = 0;
+};
+
 
 // Glavna klasa akusticke simulacije
 class Simulator {
@@ -222,11 +241,13 @@ public:
         : bvh_(bvh),
           materials_(materials) {}
 
+    /// Replaces debugSegments, when supplied, with paths from up to 200 evenly spaced emitted rays.
     TraceStats Run(
         const std::vector<Source>& sources,
         const Receiver& receiver,
         Echogram& echogram,
-        const Settings& settings = {}
+        const Settings& settings = {},
+        std::vector<RayDebugSegment>* debugSegments = nullptr
     ) const;
 
 private:

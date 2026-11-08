@@ -70,6 +70,7 @@ Application::Application()
 
 Application::~Application()
 {
+    m_ui.reset();
     m_fullscreenQuad.reset();
     m_toneMappingShader.reset();
     m_brightPassShader.reset();
@@ -269,6 +270,8 @@ void Application::RunFrame(Scene &scene,
     // which EndFrame unbinds to.
     m_renderer->RebindHdrFramebuffer();
     scene.OnPostRender();
+    if (sub.camera && m_renderer->GetDebugStats().hdrColorTextureId != 0)
+        m_ui->DrawAcousticDebug(scene);
     // RenderPostProcess immediately binds its own FBOs and reads the HDR texture
     // by GL texture ID, so the HDR FBO being bound here is not a problem.
     const auto postProcessStart = CpuClock::now();

@@ -200,7 +200,7 @@ AcousticHit BVH::Intersect(const AcousticRay& ray, float tMin, float tMax) const
     AcousticHit closestHit;
     if (m_nodes.empty()) return closestHit;
 
-    closestHit.distance = tMax;
+    float closestDistance = tMax;
 
     uint32_t stack[64];
     int stackPtr = 0;
@@ -211,7 +211,7 @@ AcousticHit BVH::Intersect(const AcousticRay& ray, float tMin, float tMax) const
         const BVHNode& node = m_nodes[nodeIdx];
 
         float tNear = 0.0f;
-        if (!IntersectAABB(ray, node.bounds, tMin, closestHit.distance, tNear)) {
+        if (!IntersectAABB(ray, node.bounds, tMin, closestDistance, tNear)) {
             continue;
         }
 
@@ -221,7 +221,8 @@ AcousticHit BVH::Intersect(const AcousticRay& ray, float tMin, float tMax) const
                 const AcousticTriangle& tri = m_triangles[triIdx];
 
                 float t, u, v;
-                if (IntersectTriangle(ray, tri, tMin, closestHit.distance, t, u, v)) {
+                if (IntersectTriangle(ray, tri, tMin, closestDistance, t, u, v)) {
+                    closestDistance = t;
                     closestHit.distance = t;
                     closestHit.point = ray.PointAt(t);
                     closestHit.u = u;

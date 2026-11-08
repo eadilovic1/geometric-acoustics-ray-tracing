@@ -31,6 +31,9 @@ public:
     /// Returns the name of the scene for display in UI.
     virtual const std::string &GetName() const { return m_sceneName; }
 
+    /// Known enclosed room volume in cubic meters, or zero if unavailable.
+    virtual float GetEnclosedAcousticVolume() const { return 0.0f; }
+
     /// Called once per frame. Override to handle input and update scene state.
     virtual void OnUpdate(float deltaTime, IInputProvider &input) {
     }
