@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -90,6 +91,9 @@ private:
         acoustics::AirConditions air;
         float speedOfSound = 0.0f;
         acoustics::RoomMetricsResult metrics;
+        float enclosedVolume = 0.0f;
+        std::array<float, OctaveBands::Count> sabineRt60{};
+        std::array<float, OctaveBands::Count> eyringRt60{};
         int plottedEchoBand = -1;
         std::vector<float> leftEchoPeaks;
         std::vector<float> rightEchoPeaks;
@@ -103,6 +107,8 @@ private:
     std::string m_acousticError;
     int m_acousticGraphBand = 3;
     int m_acousticGraphKind = 0;
+    int m_acousticMetricEar = 0;
+    int m_acousticRt60Fit = 0;
 
     // ── Draw helpers ──────────────────────────────────────────────────────────
     void DrawTopbar(int fbWidth,
@@ -149,6 +155,7 @@ private:
 
     void DrawTabAcoustics(Scene &scene, const FrameSubmission &frame);
     void DrawAcousticGraphs(AcousticRun &run);
+    void DrawAcousticMetrics(const AcousticRun &run);
 
     void DrawHelpWindow(int fbWidth, int fbHeight);
 };

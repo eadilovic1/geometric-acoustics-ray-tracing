@@ -24,6 +24,7 @@ public:
     };
 
     bool Setup();
+    float GetEnclosedAcousticVolume() const override;
     void OnUpdate(float deltaTime, IInputProvider& input) override;
 
     /// After setup, reset the listener pose and move the source to a known position.

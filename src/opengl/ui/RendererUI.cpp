@@ -1421,6 +1421,77 @@ void RendererUI::DrawAcousticGraphs(AcousticRun &run) {
     ImGui::Spacing();
 }
 
+void RendererUI::DrawAcousticMetrics(const AcousticRun &run) {
+    ImGui::Indent();
+    const float width = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().IndentSpacing;
+    const char *ears[] = {"Left ear", "Right ear"};
+    const char *fits[] = {"T30 (-5 to -35 dB)", "T20 (-5 to -25 dB)"};
+    ImGui::PushItemWidth(width * 0.65f);
+    ImGui::Combo("Ear", &m_acousticMetricEar, ears, IM_ARRAYSIZE(ears));
+    ImGui::Combo("RT60 fit", &m_acousticRt60Fit, fits, IM_ARRAYSIZE(fits));
+    ImGui::PopItemWidth();
+
+    ImGui::TextWrapped("RT60 and EDT (s), C80 and C50 (dB), D50 (%%).");
+    const auto cell = [](const acoustics::ScalarMetric &metric, const char *format) {
+        ImGui::TableNextColumn();
+        if (metric.IsValid()) {
+            ImGui::Text(format, metric.value);
+        } else {
+            ImGui::TextDisabled("--");
+            ImGui::SetItemTooltip("%s", acoustics::MetricStatusName(metric.status));
+        }
+    };
+    const auto &channel = m_acousticMetricEar == 0 ? run.metrics.left : run.metrics.right;
+    constexpr ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_RowBg |
+                                      ImGuiTableFlags_BordersInnerH;
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f, 4.0f));
+    if (ImGui::BeginTable("##roomMetrics", 6, flags, ImVec2(width, 0))) {
+        for (const char *label : {"Hz", "RT60", "EDT", "C80", "C50", "D50"})
+            ImGui::TableSetupColumn(label);
+        ImGui::TableHeadersRow();
+        for (std::size_t band = 0; band < OctaveBands::Count; ++band) {
+            const auto &values = channel.bands[band];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Text("%.0f", OctaveBands::Frequencies[band]);
+            cell(m_acousticRt60Fit == 0 ? values.rt60FromT30 : values.rt60FromT20, "%.2f");
+            cell(values.edt, "%.2f");
+            cell(values.c80Db, "%.1f");
+            cell(values.c50Db, "%.1f");
+            cell(values.d50Percent, "%.1f");
+        }
+        ImGui::EndTable();
+    }
+    ImGui::Spacing();
+    if (run.enclosedVolume > 0.0f) {
+        ImGui::TextWrapped("Reference RT60 (s) from surface absorption for %.1f m³.", run.enclosedVolume);
+        if (ImGui::BeginTable("##rt60References", 3, flags, ImVec2(width, 0))) {
+            ImGui::TableSetupColumn("Hz");
+            ImGui::TableSetupColumn("Sabine");
+            ImGui::TableSetupColumn("Eyring");
+            ImGui::TableHeadersRow();
+            for (std::size_t band = 0; band < OctaveBands::Count; ++band) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%.0f", OctaveBands::Frequencies[band]);
+                for (float seconds : {run.sabineRt60[band], run.eyringRt60[band]}) {
+                    ImGui::TableNextColumn();
+                    if (seconds > 0.0f && std::isfinite(seconds))
+                        ImGui::Text("%.3f", seconds);
+                    else
+                        ImGui::TextDisabled("--");
+                }
+            }
+            ImGui::EndTable();
+        }
+    } else {
+        ImGui::TextWrapped("Sabine and Eyring references require a known enclosed room volume.");
+    }
+    ImGui::PopStyleVar();
+    ImGui::Unindent();
+    ImGui::Spacing();
+}
+
 void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
     constexpr float centimetersPerMeter = 100.0f;
     constexpr ImGuiSliderFlags clamp = ImGuiSliderFlags_AlwaysClamp;
@@ -1509,13 +1580,22 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
 
         BVH bvh;
         bvh.Build(geometry);
-        const acoustics::Simulator simulator(bvh, AcousticMaterialLibrary::Instance());
+        const auto &materials = AcousticMaterialLibrary::Instance();
+        const acoustics::Simulator simulator(bvh, materials);
         auto runSettings = settings;
         runSettings.SetAirConditions(m_acousticAir);
         AcousticRun run{listener, acoustics::Echogram(runSettings.maxDuration), {},
                         geometry.GetTriangleCount(), m_acousticAir, runSettings.speedOfSound};
         run.stats = simulator.Run(sources, run.listener, run.echogram, runSettings);
         run.metrics = acoustics::RoomMetrics::Compute(run.echogram);
+        run.enclosedVolume = scene.GetEnclosedAcousticVolume();
+        if (run.enclosedVolume > 0.0f) {
+            geometry.SetExplicitVolume(run.enclosedVolume);
+            for (std::size_t band = 0; band < OctaveBands::Count; ++band) {
+                run.sabineRt60[band] = geometry.CalculateSabineRT60(band, materials);
+                run.eyringRt60[band] = geometry.CalculateEyringRT60(band, materials);
+            }
+        }
         m_acousticRun = std::move(run);
     };
 
@@ -1560,6 +1640,9 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
 
     if (m_acousticRun && SectionHeader("Acoustic Graphs"))
         DrawAcousticGraphs(*m_acousticRun);
+
+    if (m_acousticRun && SectionHeader("Room Metrics"))
+        DrawAcousticMetrics(*m_acousticRun);
 
     if (m_acousticRun && SectionHeader("Last Simulation")) {
         const AcousticRun &run = *m_acousticRun;

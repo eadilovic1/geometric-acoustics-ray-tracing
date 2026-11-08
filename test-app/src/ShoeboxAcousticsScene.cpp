@@ -129,6 +129,11 @@ bool ShoeboxAcousticsScene::Setup()
     return true;
 }
 
+float ShoeboxAcousticsScene::GetEnclosedAcousticVolume() const
+{
+    return kRoomDimensions.x * kRoomDimensions.y * kRoomDimensions.z;
+}
+
 void ShoeboxAcousticsScene::OnUpdate(float deltaTime, IInputProvider& input)
 {
     glm::vec3 moveDirXZ{0.0f};
