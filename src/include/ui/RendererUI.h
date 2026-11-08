@@ -86,10 +86,13 @@ private:
         acoustics::Echogram echogram;
         acoustics::TraceStats stats;
         std::size_t triangleCount = 0;
+        acoustics::AirConditions air;
+        float speedOfSound = 0.0f;
     };
 
     const Scene *m_acousticScene = nullptr;
     acoustics::Settings m_acousticSettings;
+    acoustics::AirConditions m_acousticAir;
     acoustics::Receiver m_acousticReceiver;
     std::optional<AcousticRun> m_acousticRun;
     std::string m_acousticError;

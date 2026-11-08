@@ -449,6 +449,47 @@ void Echogram::DepositChordSpan(
 }
 
 
+void Settings::SetAirConditions(const AirConditions& air) {
+    const AirConditions defaults;
+    const double temperatureK = 273.15 + std::clamp(
+        std::isfinite(air.temperatureC) ? air.temperatureC : defaults.temperatureC,
+        AirConditions::MinTemperatureC, AirConditions::MaxTemperatureC
+    );
+    const double humidityPercent = std::clamp(
+        std::isfinite(air.relativeHumidityPercent) ? air.relativeHumidityPercent : defaults.relativeHumidityPercent,
+        AirConditions::MinRelativeHumidityPercent, AirConditions::MaxRelativeHumidityPercent
+    );
+
+    // ECMA-108 Annex A, based on ISO 9613-1, at the reference pressure of 101.325 kPa.
+    const double temperatureRatio = temperatureK / 293.15;
+    const double waterMolePercent = humidityPercent *
+        std::pow(10.0, 4.6151 - 6.8346 * std::pow(273.16 / temperatureK, 1.261));
+    const double oxygenRelaxation = 24.0 +
+        40400.0 * waterMolePercent * (0.02 + waterMolePercent) / (0.391 + waterMolePercent);
+    const double nitrogenRelaxation = (9.0 + 280.0 * waterMolePercent *
+        std::exp(-4.17 * (std::pow(temperatureRatio, -1.0 / 3.0) - 1.0))) / std::sqrt(temperatureRatio);
+    const double classicalLoss = 1.84e-11 * std::sqrt(temperatureRatio);
+    const double relaxationScale = std::pow(temperatureRatio, -2.5);
+    const double oxygenLoss = 0.01275 * std::exp(-2239.1 / temperatureK);
+    const double nitrogenLoss = 0.1068 * std::exp(-3352.0 / temperatureK);
+
+    for (size_t band = 0; band < OctaveBands::Count; ++band) {
+        const double frequency = OctaveBands::Frequencies[band];
+        const double frequencySquared = frequency * frequency;
+        const double amplitudeLoss = frequencySquared * (classicalLoss + relaxationScale * (
+            oxygenLoss / (oxygenRelaxation + frequencySquared / oxygenRelaxation) +
+            nitrogenLoss / (nitrogenRelaxation + frequencySquared / nitrogenRelaxation)
+        ));
+        // The simulator attenuates energy, which is proportional to pressure squared.
+        airAbsorption[band] = static_cast<float>(2.0 * amplitudeLoss);
+    }
+
+    // Schotanus et al. (1983), Eq. 3, using specific humidity (mass fraction).
+    const double waterMoleFraction = waterMolePercent / 100.0;
+    const double specificHumidity = 0.622 * waterMoleFraction / (1.0 - 0.378 * waterMoleFraction);
+    speedOfSound = static_cast<float>(std::sqrt(1.4 * 287.04 * temperatureK * (1.0 + 0.51 * specificHumidity)));
+}
+
 // ===========================================================================
 // DIO 3 - GLAVNI ALGORITAM SIMULACIJE (Simulator::Run)
 // ===========================================================================

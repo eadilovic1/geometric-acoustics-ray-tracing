@@ -1431,8 +1431,11 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         BVH bvh;
         bvh.Build(geometry);
         const acoustics::Simulator simulator(bvh, AcousticMaterialLibrary::Instance());
-        AcousticRun run{listener, acoustics::Echogram(settings.maxDuration), {}, geometry.GetTriangleCount()};
-        run.stats = simulator.Run(sources, run.listener, run.echogram, settings);
+        auto runSettings = settings;
+        runSettings.SetAirConditions(m_acousticAir);
+        AcousticRun run{listener, acoustics::Echogram(runSettings.maxDuration), {},
+                        geometry.GetTriangleCount(), m_acousticAir, runSettings.speedOfSound};
+        run.stats = simulator.Run(sources, run.listener, run.echogram, runSettings);
         m_acousticRun = std::move(run);
     };
 
@@ -1448,7 +1451,14 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         float thresholdDb = 10.0f * std::log10(settings.minEnergyFraction);
         if (ImGui::SliderFloat("Energy threshold (dB)", &thresholdDb, -90.0f, -20.0f, "%.0f", clamp))
             settings.minEnergyFraction = std::pow(10.0f, thresholdDb / 10.0f);
+        ImGui::SliderFloat("Temperature (C)", &m_acousticAir.temperatureC,
+                           acoustics::AirConditions::MinTemperatureC, acoustics::AirConditions::MaxTemperatureC,
+                           "%.1f", clamp);
+        ImGui::SliderFloat("Relative humidity (%)", &m_acousticAir.relativeHumidityPercent,
+                           acoustics::AirConditions::MinRelativeHumidityPercent,
+                           acoustics::AirConditions::MaxRelativeHumidityPercent, "%.0f", clamp);
         ImGui::PopItemWidth();
+        ImGui::TextColored(Pal::TextMid, "Air pressure: 101.325 kPa (fixed)");
 
         if (ImGui::Button("Run Simulation", ImVec2(buttonWidth, 0))) {
             m_acousticRun.reset();
@@ -1483,6 +1493,8 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::Text("Ear spacing / radius: %.1f / %.2f cm",
                     run.listener.earSpacing * centimetersPerMeter, run.listener.earRadius * centimetersPerMeter);
         ImGui::Text("Head shadow (ILD): %s", run.listener.headShadow ? "On" : "Off");
+        ImGui::Text("Air at run: %.1f C, %.0f%% RH", run.air.temperatureC, run.air.relativeHumidityPercent);
+        ImGui::Text("Sound speed: %.1f m/s", run.speedOfSound);
         ImGui::PopStyleColor();
         ImGui::Unindent();
     }
