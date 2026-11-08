@@ -90,6 +90,7 @@ private:
 
     const Scene *m_acousticScene = nullptr;
     acoustics::Settings m_acousticSettings;
+    acoustics::Receiver m_acousticReceiver;
     std::optional<AcousticRun> m_acousticRun;
     std::string m_acousticError;
 

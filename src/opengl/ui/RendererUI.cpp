@@ -1343,8 +1343,10 @@ void RendererUI::DrawTabTerrain(Scene &scene) {
 }
 
 void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
+    constexpr float centimetersPerMeter = 100.0f;
+    constexpr ImGuiSliderFlags clamp = ImGuiSliderFlags_AlwaysClamp;
     const int enabledLights = frame.lights.ActiveLightCount();
-    acoustics::Receiver listener;
+    auto &listener = m_acousticReceiver;
     if (frame.camera)
         listener.FollowCamera(*frame.camera);
 
@@ -1360,6 +1362,31 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
             ImGui::TextColored(Pal::TextDim, "No camera for the listener.");
         }
         ImGui::PopStyleColor();
+        ImGui::Unindent();
+        ImGui::Spacing();
+    }
+
+    if (SectionHeader("Binaural Receiver")) {
+        ImGui::Indent();
+        const float sectionWidth = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().IndentSpacing;
+        ImGui::PushItemWidth(sectionWidth * 0.5f);
+
+        float spacingCm = listener.earSpacing * centimetersPerMeter;
+        const bool spacingChanged = ImGui::SliderFloat("Ear spacing (cm)", &spacingCm, 10.0f, 25.0f,
+                                                      "%.1f", clamp);
+        const float maxRadiusCm = spacingCm * 0.25f;
+        float radiusCm = std::min(listener.earRadius * centimetersPerMeter, maxRadiusCm);
+        const bool radiusChanged = ImGui::SliderFloat("Ear radius (cm)", &radiusCm, 0.5f, maxRadiusCm,
+                                                     "%.2f", clamp);
+        if (spacingChanged || radiusChanged) {
+            listener.earSpacing = spacingCm / centimetersPerMeter;
+            listener.earRadius = std::min(radiusCm / centimetersPerMeter, listener.earSpacing * 0.25f);
+            listener.headRadius = listener.earSpacing * 0.5f - listener.earRadius;
+        }
+
+        ImGui::PopItemWidth();
+        ImGui::Checkbox("Head shadow (ILD)", &listener.headShadow);
+        ImGui::TextColored(Pal::TextMid, "Head radius: %.2f cm", listener.headRadius * centimetersPerMeter);
         ImGui::Unindent();
         ImGui::Spacing();
     }
@@ -1414,7 +1441,6 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         const float buttonWidth = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().IndentSpacing;
         constexpr uint32_t minRays = 1000;
         constexpr uint32_t maxRays = 250000;
-        constexpr ImGuiSliderFlags clamp = ImGuiSliderFlags_AlwaysClamp;
         ImGui::PushItemWidth(buttonWidth * 0.5f);
         ImGui::SliderScalar("Rays per source", ImGuiDataType_U32, &settings.raysPerSource,
                             &minRays, &maxRays, "%u", clamp | ImGuiSliderFlags_Logarithmic);
@@ -1454,6 +1480,9 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::Text("Echogram: %s bins at %.0f Hz",
                     FormatCompact(run.echogram.BinCount()).c_str(), run.echogram.sampleRate);
         ImGui::Text("Listener at run: %.2f, %.2f, %.2f m", position.x, position.y, position.z);
+        ImGui::Text("Ear spacing / radius: %.1f / %.2f cm",
+                    run.listener.earSpacing * centimetersPerMeter, run.listener.earRadius * centimetersPerMeter);
+        ImGui::Text("Head shadow (ILD): %s", run.listener.headShadow ? "On" : "Off");
         ImGui::PopStyleColor();
         ImGui::Unindent();
     }
