@@ -498,7 +498,8 @@ TraceStats Simulator::Run(
     const std::vector<Source>& sources,
     const Receiver& receiver,
     Echogram& echogram,
-    const Settings& cfg
+    const Settings& cfg,
+    std::vector<RayDebugSegment>* debugSegments
 ) const {
     if (cfg.raysPerSource == 0
         || cfg.speedOfSound <= 0.0f
@@ -509,6 +510,18 @@ TraceStats Simulator::Run(
     }
 
     echogram.Clear();
+
+    uint64_t totalRays = 0;
+    if (debugSegments) {
+        debugSegments->clear();
+        const auto emittingSources = std::count_if(sources.begin(), sources.end(), [&](const Source& source) {
+            return !(MaxEnergy(source.power / static_cast<float>(cfg.raysPerSource)) <= 0.0f);
+        });
+        totalRays = static_cast<uint64_t>(emittingSources) * cfg.raysPerSource;
+    }
+    const uint64_t debugPathCount = std::min<uint64_t>(totalRays, 200);
+    uint64_t capturedPaths = 0;
+    uint64_t nextDebugRay = 0;
 
     TraceStats stats;
     std::mt19937 rng(cfg.randomSeed);
@@ -523,6 +536,11 @@ TraceStats Simulator::Run(
         }
 
         for (uint32_t i = 0; i < cfg.raysPerSource; ++i) {
+            const bool capturePath = capturedPaths < debugPathCount && stats.emitted == nextDebugRay;
+            if (capturePath) {
+                ++capturedPaths;
+                nextDebugRay = capturedPaths * totalRays / debugPathCount;
+            }
             ++stats.emitted;
 
             glm::vec3 rayOrigin = source.position;
@@ -565,6 +583,9 @@ TraceStats Simulator::Run(
                 // BVH presjek sa geometrijom scene
                 const AcousticHit hit = bvh_.Intersect(ray, cfg.rayOffset, maxT);
                 const float segment = hit.HasHit() ? hit.distance : maxT;
+
+                if (capturePath)
+                    debugSegments->push_back({ray.origin, ray.PointAt(segment), ray.bounceCount});
 
                 ++stats.segments;
 
