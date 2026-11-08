@@ -25,6 +25,8 @@ add_executable(${PROJECT_NAME}
         src/IblValidationScene.cpp
         src/BistroScene.h
         src/BistroScene.cpp
+        src/ShoeboxAcousticsScene.h
+        src/ShoeboxAcousticsScene.cpp
         src/TerrainScene.h
         src/TerrainScene.cpp
 )
