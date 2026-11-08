@@ -126,6 +126,11 @@ add_executable(AcousticsStepTests
 )
 target_link_libraries(AcousticsStepTests PRIVATE ${PROJECT_NAME})
 
+add_executable(AcousticsValidationTests
+    opengl/acoustics/AcousticsValidationTests.cpp
+)
+target_link_libraries(AcousticsValidationTests PRIVATE ${PROJECT_NAME})
+
 add_executable(AuralizationDemo
     opengl/acoustics/AuralizationDemo.cpp
 )
