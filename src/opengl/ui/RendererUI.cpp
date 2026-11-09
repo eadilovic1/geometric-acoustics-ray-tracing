@@ -2,6 +2,9 @@
 #include "ui/UITheme.h"
 
 #include "acoustics/AcousticSimulation.h"
+#include "acoustics/AcousticGeometry.h"
+#include "acoustics/BVH.h"
+#include "acoustics/AcousticMaterial.h"
 #include "core/Camera.h"
 #include "core/Primitives.h"
 #include "core/Renderer.h"
@@ -303,6 +306,9 @@ void RendererUI::Draw(int fbW, int fbH,
         m_acousticRun.reset();
         m_acousticError.clear();
         ResetAcousticAudio();
+        m_bvhCachedScene = nullptr;
+        m_cachedAcousticGeometry.reset();
+        m_cachedAcousticBvh.reset();
     }
 
     // ── Viewport fills the entire window ─────────────────────────────────────
@@ -319,6 +325,10 @@ void RendererUI::Draw(int fbW, int fbH,
     // ── Build scene submission exactly once for the whole frame ───────────────
     FrameSubmission frame;
     scene.BuildSubmission(frame);
+
+    if (frame.camera && m_acousticFollowCamera) {
+        m_acousticReceiver.FollowCamera(*frame.camera);
+    }
 
     // ── Draw regions ──────────────────────────────────────────────────────────
     DrawTopbar(fbW, scene, stats, scenes, activeSceneIndex, lookMode);
@@ -392,7 +402,10 @@ void RendererUI::DrawTopbar(int fbW,
         if (ImGui::BeginPopupContextItem("##scenesPopup", ImGuiPopupFlags_MouseButtonLeft)) {
             for (std::size_t i = 0; i < scenes.size(); ++i) {
                 if (!scenes[i]) continue;
-                if (ImGui::MenuItem(scenes[i]->GetName().c_str(), nullptr,
+                char shortcut[8] = "";
+                if (i < 9)
+                    std::snprintf(shortcut, sizeof(shortcut), "%zu", i + 1);
+                if (ImGui::MenuItem(scenes[i]->GetName().c_str(), i < 9 ? shortcut : nullptr,
                                     i == activeSceneIndex))
                     activeSceneIndex = i;
             }
@@ -1544,6 +1557,99 @@ void RendererUI::ResetAcousticAudio() {
     acoustics::AudioEngine::StopPlayback();
     m_acousticWet.reset();
     m_acousticAudioMessage.clear();
+    m_acousticLoadedDry.reset();
+}
+
+bool RendererUI::EnsureDryAudioLoaded() {
+    if (m_acousticLoadedDry)
+        return true;
+    if (m_acousticDryPath.front() == '\0')
+        return false;
+    try {
+        acoustics::MonoAudio dry;
+        const auto path = std::filesystem::path(reinterpret_cast<const char8_t *>(m_acousticDryPath.data()));
+        if (std::filesystem::exists(std::filesystem::symlink_status(path))) {
+            const auto loaded = acoustics::AudioEngine::ReadMonoWav(path, dry);
+            if (loaded.ok) {
+                m_acousticLoadedDry = std::move(dry);
+                return true;
+            } else {
+                m_acousticAudioMessage = loaded.message;
+            }
+        }
+    } catch (const std::exception &error) {
+        m_acousticAudioMessage = error.what();
+    }
+    return false;
+}
+
+void RendererUI::ExecuteAcousticSimulation(Scene &scene, const FrameSubmission &frame, bool updateAudio) {
+    if (!frame.camera) {
+        m_acousticError = "The scene has no listener camera.";
+        return;
+    }
+    const int enabledLights = frame.lights.ActiveLightCount();
+    if (enabledLights == 0) {
+        m_acousticError = "Enable a scene light to use it as a sound source.";
+        return;
+    }
+
+    if (m_bvhCachedScene != &scene || !m_cachedAcousticBvh) {
+        m_cachedAcousticGeometry = std::make_unique<AcousticSceneGeometry>();
+        m_cachedAcousticGeometry->ExtractFromScene(scene);
+        if (m_cachedAcousticGeometry->IsEmpty()) {
+            m_acousticError = "This scene has no CPU mesh triangles for acoustic simulation.";
+            return;
+        }
+        m_cachedAcousticBvh = std::make_unique<BVH>();
+        m_cachedAcousticBvh->Build(*m_cachedAcousticGeometry);
+        m_bvhCachedScene = &scene;
+    }
+
+    const AABB &bounds = m_cachedAcousticGeometry->GetBounds();
+    const glm::vec3 center = (bounds.min + bounds.max) * 0.5f;
+    const float radius = glm::length(bounds.max - bounds.min) * 0.5f;
+    auto sources = acoustics::FromLights(frame.lights, center, radius);
+    std::erase_if(sources, [](const acoustics::Source &source) {
+        const float power = source.power.Average();
+        return !std::isfinite(power) || power <= 0.0f;
+    });
+    if (sources.empty()) {
+        m_acousticError = "Set a positive intensity on an enabled scene light.";
+        return;
+    }
+
+    for (auto &source : sources) {
+        if (source.pattern == acoustics::Source::Pattern::Parallel)
+            source.position -= source.direction * (source.emitterRadius + m_acousticSettings.rayOffset);
+    }
+
+    const auto &materials = AcousticMaterialLibrary::Instance();
+    const acoustics::Simulator simulator(*m_cachedAcousticBvh, materials);
+    auto runSettings = m_acousticSettings;
+    runSettings.SetAirConditions(m_acousticAir);
+
+    AcousticRun run{m_acousticReceiver, acoustics::Echogram(runSettings.maxDuration), {},
+                    m_cachedAcousticGeometry->GetTriangleCount(), m_acousticAir, runSettings.speedOfSound};
+    run.stats = simulator.Run(sources, run.listener, run.echogram, runSettings, &run.debugSegments);
+    run.metrics = acoustics::RoomMetrics::Compute(run.echogram);
+    run.enclosedVolume = scene.GetEnclosedAcousticVolume();
+    if (run.enclosedVolume > 0.0f) {
+        m_cachedAcousticGeometry->SetExplicitVolume(run.enclosedVolume);
+        for (std::size_t band = 0; band < OctaveBands::Count; ++band) {
+            run.sabineRt60[band] = m_cachedAcousticGeometry->CalculateSabineRT60(band, materials);
+            run.eyringRt60[band] = m_cachedAcousticGeometry->CalculateEyringRT60(band, materials);
+        }
+    }
+
+    m_acousticRun = std::move(run);
+    m_acousticError.clear();
+
+    if (updateAudio) {
+        EnsureDryAudioLoaded();
+        if (m_acousticLoadedDry)
+            PlayAcousticResponse(*m_acousticLoadedDry);
+    }
 }
 
 void RendererUI::PlayAcousticResponse(const acoustics::MonoAudio &dry) {
@@ -1570,11 +1676,10 @@ void RendererUI::PlayAcousticResponse(const acoustics::MonoAudio &dry) {
 }
 
 void RendererUI::DrawAcousticDebug(const Scene &scene) {
-    if (m_acousticScene != &scene || !m_acousticRun)
+    if (m_acousticScene != &scene)
         return;
 
-    auto &run = *m_acousticRun;
-    const bool drawRays = m_showAcousticRays && !run.debugSegments.empty();
+    const bool drawRays = m_showAcousticRays && m_acousticRun && !m_acousticRun->debugSegments.empty();
     if (!drawRays && !m_showAcousticReceiver)
         return;
 
@@ -1586,13 +1691,13 @@ void RendererUI::DrawAcousticDebug(const Scene &scene) {
         return;
 
     const AcousticDebugGLState previousState;
-    if (drawRays && !run.debugRayMesh) {
+    if (drawRays && !m_acousticRun->debugRayMesh) {
         constexpr glm::vec3 direct{0.10f, 1.0f, 0.25f};
         constexpr glm::vec3 firstReflection{1.0f, 0.83f, 0.06f};
         constexpr glm::vec3 laterReflection{1.0f, 0.32f, 0.05f};
         PrimitiveMeshData rays;
-        rays.vertices.reserve(2 * run.debugSegments.size());
-        for (const auto &segment : run.debugSegments) {
+        rays.vertices.reserve(2 * m_acousticRun->debugSegments.size());
+        for (const auto &segment : m_acousticRun->debugSegments) {
             if (segment.bounceCount > m_acousticDisplayedBounces)
                 continue;
             const float order = static_cast<float>(std::min(segment.bounceCount, 5u));
@@ -1601,10 +1706,9 @@ void RendererUI::DrawAcousticDebug(const Scene &scene) {
             rays.vertices.push_back({segment.start, color});
             rays.vertices.push_back({segment.end, color});
         }
-        run.debugRayMesh = std::make_unique<MeshBuffer>(rays.CreateMeshBuffer());
+        m_acousticRun->debugRayMesh = std::make_unique<MeshBuffer>(rays.CreateMeshBuffer());
     }
     if (m_showAcousticReceiver && !m_acousticDebugSphere) {
-        // MeshBuffer uploads indices before binding its own VAO. Keep the scene's VAO intact.
         const VertexArray uploadVao;
         uploadVao.Bind();
         m_acousticDebugSphere = std::make_unique<MeshBuffer>(
@@ -1625,17 +1729,20 @@ void RendererUI::DrawAcousticDebug(const Scene &scene) {
         shader.SetUniform("u_Tint", color);
         m_acousticDebugSphere->Draw();
     };
-    const auto &listener = run.listener;
+
+    const auto &listener = m_acousticFollowCamera ? m_acousticReceiver :
+                           (m_acousticRun ? m_acousticRun->listener : m_acousticReceiver);
+
     if (m_showAcousticReceiver) {
         glDepthMask(GL_TRUE);
         drawSphere(listener.LeftEar(), listener.earRadius, {0.12f, 0.37f, 1.0f, 1.0f});
         drawSphere(listener.RightEar(), listener.earRadius, {1.0f, 0.08f, 0.12f, 1.0f});
     }
     glDepthMask(GL_FALSE);
-    if (drawRays) {
+    if (drawRays && m_acousticRun && m_acousticRun->debugRayMesh) {
         shader.SetUniform("u_Model", glm::mat4(1.0f));
         shader.SetUniform("u_Tint", glm::vec4(1.0f));
-        run.debugRayMesh->Draw(GL_LINES);
+        m_acousticRun->debugRayMesh->Draw(GL_LINES);
     }
     if (m_showAcousticReceiver) {
         glEnable(GL_BLEND);
@@ -1650,7 +1757,7 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
     constexpr ImGuiSliderFlags clamp = ImGuiSliderFlags_AlwaysClamp;
     const int enabledLights = frame.lights.ActiveLightCount();
     auto &listener = m_acousticReceiver;
-    if (frame.camera)
+    if (frame.camera && m_acousticFollowCamera)
         listener.FollowCamera(*frame.camera);
 
     if (SectionHeader("Scene Inputs")) {
@@ -1661,6 +1768,7 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         if (frame.camera) {
             const auto &position = listener.headCenter;
             ImGui::Text("Listener: %.2f, %.2f, %.2f m", position.x, position.y, position.z);
+            ImGui::Text("Facing:   %.2f, %.2f, %.2f", listener.forward.x, listener.forward.y, listener.forward.z);
         } else {
             ImGui::TextColored(Pal::TextDim, "No camera for the listener.");
         }
@@ -1673,6 +1781,13 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::Indent();
         const float sectionWidth = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().IndentSpacing;
         ImGui::PushItemWidth(sectionWidth * 0.5f);
+
+        ImGui::Checkbox("Follow camera (Live tracking)", &m_acousticFollowCamera);
+        if (!m_acousticFollowCamera && frame.camera) {
+            ImGui::SameLine();
+            if (ImGui::Button("Snap to Camera"))
+                listener.FollowCamera(*frame.camera);
+        }
 
         float spacingCm = listener.earSpacing * centimetersPerMeter;
         const bool spacingChanged = ImGui::SliderFloat("Ear spacing (cm)", &spacingCm, 10.0f, 25.0f,
@@ -1690,77 +1805,13 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::PopItemWidth();
         ImGui::Checkbox("Head shadow (ILD)", &listener.headShadow);
         ImGui::TextColored(Pal::TextMid, "Head radius: %.2f cm", listener.headRadius * centimetersPerMeter);
+        ImGui::TextColored(Pal::Accent, "Live Listener: (%.2f, %.2f, %.2f)",
+                           listener.headCenter.x, listener.headCenter.y, listener.headCenter.z);
         ImGui::Unindent();
         ImGui::Spacing();
     }
 
     auto &settings = m_acousticSettings;
-    const auto runSimulation = [&] {
-        if (!frame.camera) {
-            m_acousticError = "The scene has no listener camera.";
-            return;
-        }
-        if (enabledLights == 0) {
-            m_acousticError = "Enable a scene light to use it as a sound source.";
-            return;
-        }
-
-        AcousticSceneGeometry geometry;
-        geometry.ExtractFromScene(scene);
-        if (geometry.IsEmpty()) {
-            m_acousticError = "This scene has no CPU mesh triangles for acoustic simulation.";
-            return;
-        }
-
-        const AABB &bounds = geometry.GetBounds();
-        const glm::vec3 center = (bounds.min + bounds.max) * 0.5f;
-        const float radius = glm::length(bounds.max - bounds.min) * 0.5f;
-        auto sources = acoustics::FromLights(frame.lights, center, radius);
-        std::erase_if(sources, [](const acoustics::Source &source) {
-            const float power = source.power.Average();
-            return !std::isfinite(power) || power <= 0.0f;
-        });
-        if (sources.empty()) {
-            m_acousticError = "Set a positive intensity on an enabled scene light.";
-            return;
-        }
-
-        // Start the directional wavefront on the incoming side of the scene bounds.
-        for (auto &source : sources) {
-            if (source.pattern == acoustics::Source::Pattern::Parallel)
-                source.position -= source.direction * (source.emitterRadius + settings.rayOffset);
-        }
-
-        BVH bvh;
-        bvh.Build(geometry);
-        const auto &materials = AcousticMaterialLibrary::Instance();
-        const acoustics::Simulator simulator(bvh, materials);
-        auto runSettings = settings;
-        runSettings.SetAirConditions(m_acousticAir);
-        AcousticRun run{listener, acoustics::Echogram(runSettings.maxDuration), {},
-                        geometry.GetTriangleCount(), m_acousticAir, runSettings.speedOfSound};
-        run.stats = simulator.Run(sources, run.listener, run.echogram, runSettings, &run.debugSegments);
-        run.metrics = acoustics::RoomMetrics::Compute(run.echogram);
-        run.enclosedVolume = scene.GetEnclosedAcousticVolume();
-        if (run.enclosedVolume > 0.0f) {
-            geometry.SetExplicitVolume(run.enclosedVolume);
-            for (std::size_t band = 0; band < OctaveBands::Count; ++band) {
-                run.sabineRt60[band] = geometry.CalculateSabineRT60(band, materials);
-                run.eyringRt60[band] = geometry.CalculateEyringRT60(band, materials);
-            }
-        }
-        m_acousticRun = std::move(run);
-    };
-    const auto startSimulation = [&] {
-        ResetAcousticAudio();
-        m_acousticRun.reset();
-        m_acousticError.clear();
-        try {
-            runSimulation();
-        } catch (const std::exception &error) {
-            m_acousticError = error.what();
-        }
-    };
 
     if (SectionHeader("Simulation")) {
         ImGui::Indent();
@@ -1772,8 +1823,9 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
                             &minRays, &maxRays, "%u", clamp | ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("Max duration (s)", &settings.maxDuration, 0.1f, 5.0f, "%.2f", clamp);
         float thresholdDb = 10.0f * std::log10(settings.minEnergyFraction);
-        if (ImGui::SliderFloat("Energy threshold (dB)", &thresholdDb, -90.0f, -20.0f, "%.0f", clamp))
+        if (ImGui::SliderFloat("Energy threshold (dB)", &thresholdDb, -90.0f, -20.0f, "%.0f", clamp)) {
             settings.minEnergyFraction = std::pow(10.0f, thresholdDb / 10.0f);
+        }
         ImGui::SliderFloat("Temperature (C)", &m_acousticAir.temperatureC,
                            acoustics::AirConditions::MinTemperatureC, acoustics::AirConditions::MaxTemperatureC,
                            "%.1f", clamp);
@@ -1783,8 +1835,13 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::PopItemWidth();
         ImGui::TextColored(Pal::TextMid, "Air pressure: 101.325 kPa (fixed)");
 
-        if (ImGui::Button("Run Simulation", ImVec2(buttonWidth, 0)))
-            startSimulation();
+        if (ImGui::Button("Run Simulation", ImVec2(buttonWidth, 0))) {
+            try {
+                ExecuteAcousticSimulation(scene, frame, false);
+            } catch (const std::exception &error) {
+                m_acousticError = error.what();
+            }
+        }
         if (!m_acousticError.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, Pal::Orange);
             ImGui::TextWrapped("%s", m_acousticError.c_str());
@@ -1797,6 +1854,7 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
     if (SectionHeader("3D Debug View")) {
         ImGui::Indent();
         ImGui::Checkbox("Show ray paths", &m_showAcousticRays);
+        ImGui::SameLine();
         ImGui::Checkbox("Show listener", &m_showAcousticReceiver);
         if (m_acousticRun) {
             constexpr uint32_t directOnly = 0;
@@ -1807,10 +1865,11 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
                 m_acousticRun->debugRayMesh.reset();
             ImGui::EndDisabled();
             ImGui::TextWrapped("Green: direct segments. Yellow to orange: reflected segments.");
-            ImGui::TextWrapped("Blue: left ear. Red: right ear.");
-            ImGui::TextWrapped("Showing the last run. Move the camera to inspect the listener.");
+            ImGui::TextWrapped("Blue sphere: Left ear | Red sphere: Right ear | Center: Head");
+            ImGui::TextColored(Pal::TextMid, "Tip: Press C or F3 for Third-Person camera to orbit and inspect the moving listener!");
         } else {
-            ImGui::TextWrapped("Run a simulation to display the paths and listener.");
+            ImGui::TextWrapped("Blue sphere: Left ear | Red sphere: Right ear");
+            ImGui::TextColored(Pal::TextMid, "Tip: Press C or F3 for Third-Person camera to inspect the listener!");
         }
         ImGui::Unindent();
         ImGui::Spacing();
@@ -1824,16 +1883,12 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         if (ImGui::InputText("##dryWavPath", m_acousticDryPath.data(), m_acousticDryPath.size()))
             ResetAcousticAudio();
         ImGui::BeginDisabled(m_acousticDryPath.front() == '\0');
-        if (ImGui::Button("Simulate & Play")) {
+        const bool pressedP = ImGui::IsKeyPressed(ImGuiKey_P, false) && !ImGui::GetIO().WantTextInput;
+        if (ImGui::Button("Simulate & Play (P)") || pressedP) {
             try {
-                acoustics::MonoAudio dry;
-                const auto path = std::filesystem::path(reinterpret_cast<const char8_t *>(m_acousticDryPath.data()));
-                const auto loaded = acoustics::AudioEngine::ReadMonoWav(path, dry);
-                if (loaded.ok) {
-                    startSimulation();
-                    PlayAcousticResponse(dry);
-                } else {
-                    m_acousticAudioMessage = loaded.message;
+                if (EnsureDryAudioLoaded() && m_acousticLoadedDry) {
+                    ExecuteAcousticSimulation(scene, frame, false);
+                    PlayAcousticResponse(*m_acousticLoadedDry);
                 }
             } catch (const std::exception &error) {
                 m_acousticAudioMessage = error.what();
@@ -1841,9 +1896,19 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::BeginDisabled(!m_acousticWet);
-        if (ImGui::Button("Replay Last"))
-            m_acousticAudioMessage = acoustics::AudioEngine::PlayStereo(*m_acousticWet).message;
+        ImGui::BeginDisabled(!m_acousticLoadedDry && !m_acousticWet);
+        if (ImGui::Button("Replay (Current Pos)")) {
+            try {
+                if (EnsureDryAudioLoaded() && m_acousticLoadedDry) {
+                    ExecuteAcousticSimulation(scene, frame, false);
+                    PlayAcousticResponse(*m_acousticLoadedDry);
+                } else if (m_acousticWet) {
+                    m_acousticAudioMessage = acoustics::AudioEngine::PlayStereo(*m_acousticWet).message;
+                }
+            } catch (const std::exception &error) {
+                m_acousticAudioMessage = error.what();
+            }
+        }
         ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Stop Preview"))
@@ -1912,8 +1977,6 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Help window
 // ─────────────────────────────────────────────────────────────────────────────
 void RendererUI::DrawHelpWindow(int fbW, int fbH) {
     constexpr float w = 380.0f;

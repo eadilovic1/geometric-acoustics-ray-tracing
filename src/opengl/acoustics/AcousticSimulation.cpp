@@ -332,7 +332,10 @@ glm::vec3 Receiver::RightEar() const {
 void Receiver::FollowCamera(const Camera& camera, float eyeHeightOffset) {
     if (camera.GetMode() == CameraMode::ThirdPerson) {
         // U ThirdPerson modu uši su vezane za glavu lika (centar orbite + visina očiju)
-        headCenter = camera.GetOrbitTarget() + SafeUnit(camera.GetUp(), {0, 1, 0}) * eyeHeightOffset;
+        headCenter = camera.GetOrbitTarget();
+        if (eyeHeightOffset > 0.0f && std::abs(camera.GetOrbitTarget().y) < 0.3f) {
+            headCenter += SafeUnit(camera.GetUp(), {0, 1, 0}) * eyeHeightOffset;
+        }
     } else {
         // U FreeFly i FirstPerson modu uši prate stvarnu poziciju kamere
         headCenter = camera.GetPosition();

@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include "acoustics/AcousticSimulation.h"
 #include "acoustics/AudioEngine.h"
 #include "acoustics/RoomMetrics.h"
@@ -15,6 +16,8 @@ class MeshBuffer;
 class Renderer;
 class MouseInput;
 class ShaderProgram;
+class AcousticSceneGeometry;
+class BVH;
 struct RendererDebugStats;
 struct FrameSubmission;
 
@@ -64,7 +67,6 @@ public:
     bool wireframeOverride = false;
     bool normalMapOverride = true;
     bool skyboxOverride = true;
-    // After: bool skyboxOverride = true;
     bool  tonemapEnabled        = true;
     int   tonemapOperator       = 1;   // 0=Reinhard, 1=ACES, 2=Uncharted2
     float exposure              = 1.0f;
@@ -115,7 +117,12 @@ private:
     acoustics::Receiver m_acousticReceiver;
     std::optional<AcousticRun> m_acousticRun;
     std::string m_acousticError;
-    std::array<char, 1024> m_acousticDryPath{};
+    std::array<char, 1024> m_acousticDryPath = [] {
+        std::array<char, 1024> p{};
+        constexpr char def[] = "assets/audio/PhoneSound_5s_mono.wav";
+        std::copy_n(def, sizeof(def), p.data());
+        return p;
+    }();
     char m_acousticStereoPath[1024] = "auralized.wav";
     std::optional<acoustics::StereoAudio> m_acousticWet;
     std::string m_acousticAudioMessage;
@@ -128,6 +135,14 @@ private:
     uint32_t m_acousticDisplayedBounces = 5;
     std::unique_ptr<ShaderProgram> m_acousticDebugShader;
     std::unique_ptr<MeshBuffer> m_acousticDebugSphere;
+
+    // Acoustic listener camera tracking & cached geometry
+    bool m_acousticFollowCamera = true;
+    std::optional<acoustics::MonoAudio> m_acousticLoadedDry;
+
+    const Scene *m_bvhCachedScene = nullptr;
+    std::unique_ptr<AcousticSceneGeometry> m_cachedAcousticGeometry;
+    std::unique_ptr<BVH> m_cachedAcousticBvh;
 
     // ── Draw helpers ──────────────────────────────────────────────────────────
     void DrawTopbar(int fbWidth,
@@ -177,6 +192,9 @@ private:
     void DrawAcousticMetrics(const AcousticRun &run);
     void ResetAcousticAudio();
     void PlayAcousticResponse(const acoustics::MonoAudio &dry);
+
+    void ExecuteAcousticSimulation(Scene &scene, const FrameSubmission &frame, bool updateAudio = false);
+    bool EnsureDryAudioLoaded();
 
     void DrawHelpWindow(int fbWidth, int fbHeight);
 };
