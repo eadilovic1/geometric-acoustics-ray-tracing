@@ -3,10 +3,7 @@
 #include <cstddef>
 #include <vector>
 
-#include "BistroScene.h"
-#include "CapturePresetScene.h"
 #include "ShoeboxAcousticsScene.h"
-#include "TerrainScene.h"
 
 int main()
 {
@@ -19,44 +16,14 @@ int main()
         return -1;
     }
 
-    TerrainScene terrainScene;
-    BistroScene bistroScene;
-    CapturePresetScene captureBaseline(CapturePresetKind::Baseline);
-    CapturePresetScene captureDenseGrid(CapturePresetKind::DenseGrid);
-    CapturePresetScene captureMaterialSweep(CapturePresetKind::MaterialSweep);
-    CapturePresetScene captureCulling(CapturePresetKind::CullingTest);
     ShoeboxAcousticsScene shoeboxScene;
 
-    bool terrainOk = terrainScene.Setup();
-    bool bistroOk = bistroScene.Setup();
-    bool captureBaselineOk = captureBaseline.Setup();
-    bool captureDenseGridOk = captureDenseGrid.Setup();
-    bool captureMaterialSweepOk = captureMaterialSweep.Setup();
-    bool captureCullingOk = captureCulling.Setup();
     bool shoeboxOk = shoeboxScene.Setup();
 
-    if (!terrainOk)
-        spdlog::error("[TestApp] TerrainScene::Setup() failed");
-    if (!bistroOk)
-        spdlog::error("[TestApp] BistroScene::Setup() failed");
-    if (!captureBaselineOk)
-        spdlog::error("[TestApp] Capture baseline setup failed");
-    if (!captureDenseGridOk)
-        spdlog::error("[TestApp] Capture dense grid setup failed");
-    if (!captureMaterialSweepOk)
-        spdlog::error("[TestApp] Capture material sweep setup failed");
-    if (!captureCullingOk)
-        spdlog::error("[TestApp] Capture culling setup failed");
     if (!shoeboxOk)
         spdlog::error("[TestApp] ShoeboxAcousticsScene::Setup() failed");
 
     std::vector<Scene*> scenes;
-    if (terrainOk) scenes.push_back(&terrainScene);
-    if (bistroOk) scenes.push_back(&bistroScene);
-    if (captureBaselineOk) scenes.push_back(&captureBaseline);
-    if (captureDenseGridOk) scenes.push_back(&captureDenseGrid);
-    if (captureMaterialSweepOk) scenes.push_back(&captureMaterialSweep);
-    if (captureCullingOk) scenes.push_back(&captureCulling);
     if (shoeboxOk) scenes.push_back(&shoeboxScene);
 
     for (std::size_t i = 0; i < scenes.size(); ++i)
