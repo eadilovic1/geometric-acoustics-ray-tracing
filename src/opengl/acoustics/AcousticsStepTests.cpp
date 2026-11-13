@@ -1,6 +1,10 @@
+#include "acoustics/AcousticGeometry.h"
+#include "acoustics/AcousticSimulation.h"
 #include "acoustics/AudioEngine.h"
+#include "acoustics/BVH.h"
 #include "acoustics/BandpassFilter.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -406,6 +410,54 @@ void TestConvolution() {
     Expect(CloseSequence(fast.audio.left, reference, 1e-4f) && CloseSequence(fast.audio.right, reference, 1e-4f),
            "overlap-add matches direct convolution");
 
+    // A ringtone-like burst, then the same burst again 2.0 s later. The delay
+    // is not a multiple of the 2048-sample overlap-add block.
+    std::vector<float> tone(180);
+    for (std::size_t n = 0; n < tone.size(); ++n) {
+        tone[n] = static_cast<float>((n * 17) % 11) / 11.0f - 0.5f;
+    }
+    constexpr std::size_t kDelay = 96000;
+    std::vector<float> oneImpulse(kDelay + 1, 0.0f);
+    oneImpulse[100] = 0.4f;
+    std::vector<float> twoImpulses = oneImpulse;
+    twoImpulses[kDelay] = -0.25f;
+    const auto oneReference = NaiveConvolve(tone, oneImpulse);
+    const auto twoReference = NaiveConvolve(tone, twoImpulses);
+
+    acoustics::MonoAudio toneAudio;
+    toneAudio.sampleRate = 48000.0f;
+    toneAudio.samples = tone;
+    acoustics::StereoAudio oneAudio;
+    oneAudio.sampleRate = 48000.0f;
+    oneAudio.left = oneImpulse;
+    oneAudio.right = oneImpulse;
+    acoustics::StereoAudio twoAudio;
+    twoAudio.sampleRate = 48000.0f;
+    twoAudio.left = twoImpulses;
+    twoAudio.right = twoImpulses;
+
+    const auto oneFast = acoustics::AudioEngine::Convolve(toneAudio, oneAudio, 2048);
+    const auto twoFast = acoustics::AudioEngine::Convolve(toneAudio, twoAudio, 2048);
+    const auto twoSmallBlocks = acoustics::AudioEngine::Convolve(toneAudio, twoAudio, 8);
+    const std::size_t oneLength = tone.size() + oneImpulse.size() - 1;
+    const std::size_t twoLength = tone.size() + twoImpulses.size() - 1;
+    Expect(oneFast.ok && oneFast.audio.left.size() == oneLength &&
+               CloseSequence(oneFast.audio.left, oneReference, 1e-4f) &&
+               CloseSequence(oneFast.audio.right, oneReference, 1e-4f),
+           "one delayed impulse is only a scaled shifted copy");
+    Expect(twoFast.ok && twoFast.audio.left.size() == twoLength &&
+               CloseSequence(twoFast.audio.left, twoReference, 1e-4f) &&
+               CloseSequence(twoFast.audio.right, twoReference, 1e-4f),
+           "two impulses 2 s apart match direct convolution");
+    Expect(twoSmallBlocks.ok && CloseSequence(twoSmallBlocks.audio.left, twoReference, 1e-4f),
+           "two impulses match direct convolution on 8-sample blocks");
+
+    bool secondCopyOnlyAtDelay = true;
+    for (std::size_t n = 100 + tone.size(); n < kDelay && secondCopyOnlyAtDelay; ++n) {
+        secondCopyOnlyAtDelay = std::abs(twoFast.audio.left[n]) <= 1e-4f;
+    }
+    Expect(secondCopyOnlyAtDelay, "no extra copy appears between the two impulses");
+
     dry.samples = {1.0f, std::numeric_limits<float>::quiet_NaN()};
     Expect(!acoustics::AudioEngine::Convolve(dry, impulse).ok, "non-finite audio is rejected");
 }
@@ -517,6 +569,142 @@ void TestWavRoundTrip(const std::filesystem::path& directory) {
     Expect(missing.status == acoustics::PlaybackStatus::Failed, "missing WAV does not pretend to play");
 }
 
+void TestLateSpikeAndFewRays() {
+    auto echogram = MakeEchogram(2.0f, 48000.0f);
+    echogram.left[10] = OctaveBands(1.0f);
+    echogram.right[10] = OctaveBands(1.0f);
+    constexpr std::size_t kLate = 48000 * 2 - 10;
+    echogram.left[kLate] = OctaveBands(0.01f);
+    echogram.right[kLate] = OctaveBands(0.01f);
+
+    acoustics::AudioEngine::SynthOptions raw;
+    raw.peakNormalize = false;
+    const auto normalized = acoustics::AudioEngine::SynthesizeImpulseResponse(echogram);
+    const auto unscaled = acoustics::AudioEngine::SynthesizeImpulseResponse(echogram, raw);
+    const auto peakNear = [](const std::vector<float>& samples, std::size_t begin, std::size_t end) {
+        float peak = 0.0f;
+        for (std::size_t n = begin; n < end && n < samples.size(); ++n) {
+            peak = std::max(peak, std::abs(samples[n]));
+        }
+        return peak;
+    };
+    const float normEarly = peakNear(normalized.audio.left, 0, 4000);
+    const float normLate = peakNear(normalized.audio.left, kLate, kLate + 4000);
+    const float rawEarly = peakNear(unscaled.audio.left, 0, 4000);
+    const float rawLate = peakNear(unscaled.audio.left, kLate, kLate + 4000);
+    const double normRatio = normLate / normEarly;
+    const double rawRatio = rawLate / rawEarly;
+    std::cout << "  late/early peak ratio normalized=" << normRatio << " raw=" << rawRatio
+              << "  raw late peak=" << rawLate << " normalized late peak=" << normLate << "\n";
+    Expect(normalized.ok && unscaled.ok && rawEarly > 0.0f && rawLate > 0.0f,
+           "sparse echogram synthesizes an early and a late burst");
+    Expect(std::abs(normRatio - rawRatio) / rawRatio < 0.05,
+           "peak normalization keeps the late-to-early ratio");
+    Expect(normLate > rawLate, "peak normalization raises the whole response, including the late burst");
+
+    const auto& materials = AcousticMaterialLibrary::Instance();
+    const auto wall = materials.GetMaterialId("Uniform02");
+    AcousticSceneGeometry room;
+    room.AddShoeboxRoom({10.0f, 3.0f, 8.0f}, wall, wall, wall, {0.0f, 1.5f, 0.0f});
+    BVH bvh;
+    bvh.Build(room);
+    const acoustics::Simulator simulator(bvh, materials);
+    acoustics::Receiver listener;
+    listener.headCenter = {0.0f, 1.5f, 0.5f};
+    listener.headShadow = false;
+    acoustics::Source source;
+    source.position = listener.headCenter + 2.0f * listener.forward;
+    source.power = OctaveBands(3.0f);
+
+    const auto reportRays = [&](std::uint32_t rays, std::uint32_t seed) {
+        acoustics::Settings settings;
+        settings.raysPerSource = rays;
+        settings.maxBounces = 50;
+        settings.maxDuration = 2.0f;
+        settings.randomSeed = seed;
+        settings.airAbsorption = OctaveBands::Zero();
+        acoustics::Echogram echo(settings.maxDuration);
+        const auto stats = simulator.Run({source}, listener, echo, settings);
+        struct Cluster { std::size_t begin = 0; double energy = 0.0; };
+        std::vector<Cluster> clusters;
+        for (std::size_t n = 0; n < echo.left.size(); ++n) {
+            const double energy = static_cast<double>(echo.left[n].Average() + echo.right[n].Average());
+            if (!(energy > 0.0)) continue;
+            if (!clusters.empty() && n <= clusters.back().begin + 64) clusters.back().energy += energy;
+            else clusters.push_back({n, energy});
+        }
+        std::cout << "  rays=" << rays << " seed=" << seed
+                  << " earHits=" << stats.earHits
+                  << " escaped=" << stats.escaped
+                  << " clusters=" << clusters.size() << "\n";
+        for (const Cluster& cluster : clusters) {
+            std::cout << "    t=" << static_cast<double>(cluster.begin) / echo.sampleRate
+                      << " s energy=" << cluster.energy << "\n";
+        }
+        const bool finalBinSilent = echo.left.back().Average() == 0.0f && echo.right.back().Average() == 0.0f;
+        std::cout << "    final bin silent=" << (finalBinSilent ? "yes" : "no") << "\n";
+        return clusters.size();
+    };
+    std::size_t runsWithTwoArrivals = 0;
+    std::size_t runsWithAnyArrival = 0;
+    std::size_t runsWritingFinalBin = 0;
+    for (std::uint32_t rays = 1; rays <= 2; ++rays) {
+        for (std::uint32_t seed = 0; seed < 64; ++seed) {
+            acoustics::Settings settings;
+            settings.raysPerSource = rays;
+            settings.maxBounces = 50;
+            settings.maxDuration = 2.0f;
+            settings.randomSeed = seed;
+            settings.airAbsorption = OctaveBands::Zero();
+            acoustics::Echogram echo(settings.maxDuration);
+            const auto stats = simulator.Run({source}, listener, echo, settings);
+            std::size_t clusters = 0;
+            std::size_t previous = 0;
+            bool any = false;
+            for (std::size_t n = 0; n < echo.left.size(); ++n) {
+                const double energy = static_cast<double>(echo.left[n].Average() + echo.right[n].Average());
+                if (!(energy > 0.0)) continue;
+                if (!any || n > previous + 64) ++clusters;
+                previous = n;
+                any = true;
+            }
+            if (stats.earHits > 0) ++runsWithAnyArrival;
+            if (stats.earHits > 0 && !any) {
+                std::cout << "    energy scan missed ear hits rays=" << rays << " seed=" << seed
+                          << " earHits=" << stats.earHits << "\n";
+            }
+            if (clusters >= 2) {
+                ++runsWithTwoArrivals;
+                std::cout << "    multiple arrivals rays=" << rays << " seed=" << seed
+                          << " clusters=" << clusters << " earHits=" << stats.earHits << "\n";
+            }
+            if (echo.left.back().Average() > 0.0f || echo.right.back().Average() > 0.0f) ++runsWritingFinalBin;
+        }
+    }
+    std::cout << "  128 runs of 1 or 2 rays: arrivals=" << runsWithAnyArrival
+              << " two-or-more clusters=" << runsWithTwoArrivals
+              << " final-bin writes=" << runsWritingFinalBin << "\n";
+    reportRays(1, 42);
+    reportRays(2, 42);
+    Expect(runsWritingFinalBin == 0, "these 1-2 ray runs do not write an impulse into the final bin");
+
+    acoustics::Receiver outside;
+    outside.headCenter = {0.0f, 80.0f, 0.0f};
+    outside.headShadow = false;
+    acoustics::Settings missed;
+    missed.raysPerSource = 2;
+    missed.maxBounces = 50;
+    missed.maxDuration = 2.0f;
+    missed.randomSeed = 42;
+    acoustics::Echogram silent(missed.maxDuration);
+    const auto missedStats = simulator.Run({source}, outside, silent, missed);
+    bool anyEnergy = false;
+    for (const OctaveBands& bin : silent.left) anyEnergy = anyEnergy || bin.Average() > 0.0f;
+    for (const OctaveBands& bin : silent.right) anyEnergy = anyEnergy || bin.Average() > 0.0f;
+    Expect(missedStats.earHits == 0 && !anyEnergy,
+           "a ray that never meets an ear leaves the echogram empty at 2 s");
+}
+
 void TestSyntheticDemo(const std::filesystem::path& directory) {
     const auto path = directory / "synthetic-demo.wav";
     const auto demo = acoustics::AudioEngine::RunSyntheticDemo(path, false);
@@ -553,6 +741,7 @@ int main() {
     TestBandpassStability();
     TestImpulseResponseContract();
     TestConvolution();
+    TestLateSpikeAndFewRays();
     TestResampleAndRateConversion();
 
     const auto directory = std::filesystem::temp_directory_path() / "ga-ray-tracing-step56";

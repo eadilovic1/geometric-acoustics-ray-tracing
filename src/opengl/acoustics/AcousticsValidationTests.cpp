@@ -9,8 +9,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <utility>
@@ -373,6 +375,453 @@ bool TestComplexGeometry() {
     return intersections && simulation;
 }
 
+// ---------------------------------------------------------------------------
+// Distance, absorption and playback. The tracer is unchanged; these checks
+// measure the echogram in a time window and the audio path around it.
+// ---------------------------------------------------------------------------
+
+constexpr float kSafePeak = 0.99f;
+
+double SumEnergy(const std::vector<OctaveBands>& bins, std::size_t begin, std::size_t end) {
+    double sum = 0.0;
+    end = std::min(end, bins.size());
+    for (std::size_t i = begin; i < end; ++i) {
+        for (float value : bins[i].values) {
+            if (std::isfinite(value) && value > 0.0f) sum += value;
+        }
+    }
+    return sum;
+}
+
+double SumBand(const std::vector<OctaveBands>& bins, std::size_t band, std::size_t begin, std::size_t end) {
+    double sum = 0.0;
+    end = std::min(end, bins.size());
+    for (std::size_t i = begin; i < end; ++i) {
+        const float value = bins[i][band];
+        if (std::isfinite(value) && value > 0.0f) sum += value;
+    }
+    return sum;
+}
+
+struct EnergyParts {
+    double direct = 0.0;
+    double total = 0.0;
+    double directBand = 0.0;
+    double totalBand = 0.0;
+};
+
+EnergyParts SplitEnergy(const acoustics::Echogram& echo, float t0, float t1) {
+    const std::size_t last = echo.BinCount();
+    const auto index = [&](float time) {
+        if (!(time > 0.0f)) return std::size_t{0};
+        const auto bin = static_cast<std::size_t>(std::floor(time * echo.sampleRate));
+        return std::min(bin, last);
+    };
+    const std::size_t begin = index(t0);
+    const std::size_t end = std::max(begin, index(t1));
+    EnergyParts parts;
+    parts.direct = SumEnergy(echo.left, begin, end) + SumEnergy(echo.right, begin, end);
+    parts.total = SumEnergy(echo.left, 0, last) + SumEnergy(echo.right, 0, last);
+    parts.directBand = SumBand(echo.left, kBand1kHz, begin, end) + SumBand(echo.right, kBand1kHz, begin, end);
+    parts.totalBand = SumBand(echo.left, kBand1kHz, 0, last) + SumBand(echo.right, kBand1kHz, 0, last);
+    return parts;
+}
+
+float DirectArrivalTime(float distance, float earSpacing, float speed) {
+    return std::hypot(distance, earSpacing * 0.5f) / speed;
+}
+
+double Decibels(double value, double reference) {
+    return 10.0 * std::log10(value / reference);
+}
+
+double AmplitudeDecibels(double value, double reference) {
+    return 20.0 * std::log10(value / reference);
+}
+
+float PeakAbs(const acoustics::StereoAudio& audio) {
+    float peak = 0.0f;
+    for (float sample : audio.left) peak = std::max(peak, std::abs(sample));
+    for (float sample : audio.right) peak = std::max(peak, std::abs(sample));
+    return peak;
+}
+
+double Rms(const acoustics::StereoAudio& audio) {
+    double sum = 0.0;
+    std::size_t count = 0;
+    for (float sample : audio.left) {
+        sum += static_cast<double>(sample) * sample;
+        ++count;
+    }
+    for (float sample : audio.right) {
+        sum += static_cast<double>(sample) * sample;
+        ++count;
+    }
+    return count > 0 ? std::sqrt(sum / static_cast<double>(count)) : 0.0;
+}
+
+float LimiterGain(float peak) {
+    return peak > kSafePeak ? kSafePeak / peak : 1.0f;
+}
+
+acoustics::MonoAudio MakeDrySignal() {
+    acoustics::MonoAudio dry;
+    dry.sampleRate = 48000.0f;
+    dry.samples.resize(4800);
+    for (std::size_t n = 0; n < dry.samples.size(); ++n) {
+        const float phase = 2.0f * 3.14159265f * 1000.0f * static_cast<float>(n) / dry.sampleRate;
+        dry.samples[n] = 0.5f * std::sin(phase);
+    }
+    return dry;
+}
+
+struct AudioLevels {
+    float peak = 0.0f;
+    double rms = 0.0f;
+    float limiterGain = 1.0f;
+};
+
+AudioLevels MeasureAudio(const acoustics::StereoAudio& audio) {
+    AudioLevels levels;
+    levels.peak = PeakAbs(audio);
+    levels.rms = Rms(audio);
+    levels.limiterGain = LimiterGain(levels.peak);
+    return levels;
+}
+
+void PrintPair(const char* label, double nearValue, double farValue, bool amplitude) {
+    const double db = (nearValue > 0.0 && farValue > 0.0)
+        ? (amplitude ? AmplitudeDecibels(farValue, nearValue) : Decibels(farValue, nearValue))
+        : std::numeric_limits<double>::quiet_NaN();
+    std::cout << label << "  2m=" << nearValue << "  4m=" << farValue << "  4m-2m=" << db << " dB\n";
+}
+
+acoustics::Source SourceAt(const acoustics::Receiver& listener, float distance, float power) {
+    acoustics::Source source;
+    source.position = listener.headCenter + distance * listener.forward;
+    source.power = OctaveBands(power);
+    return source;
+}
+
+acoustics::Echogram Trace(
+    const acoustics::Simulator& simulator,
+    const acoustics::Receiver& listener,
+    float distance,
+    acoustics::Settings settings,
+    float power,
+    acoustics::TraceStats* stats = nullptr
+) {
+    acoustics::Echogram echogram(settings.maxDuration);
+    const auto result = simulator.Run({SourceAt(listener, distance, power)}, listener, echogram, settings);
+    if (stats) *stats = result;
+    return echogram;
+}
+
+void PrintAudioPolicy(const char* name, const acoustics::Echogram& nearEcho, const acoustics::Echogram& farEcho,
+                      const acoustics::MonoAudio& dry) {
+    acoustics::AudioEngine::SynthOptions raw;
+    raw.peakNormalize = false;
+    const acoustics::AudioEngine::SynthOptions normalized{};
+    const auto nearRaw = acoustics::AudioEngine::SynthesizeImpulseResponse(nearEcho, raw);
+    const auto farRaw = acoustics::AudioEngine::SynthesizeImpulseResponse(farEcho, raw);
+    const auto nearNorm = acoustics::AudioEngine::SynthesizeImpulseResponse(nearEcho, normalized);
+    const auto farNorm = acoustics::AudioEngine::SynthesizeImpulseResponse(farEcho, normalized);
+    const auto nearWet = acoustics::AudioEngine::Convolve(dry, nearRaw.audio);
+    const auto farWet = acoustics::AudioEngine::Convolve(dry, farRaw.audio);
+    const auto nearWetNorm = acoustics::AudioEngine::Convolve(dry, nearNorm.audio);
+    const auto farWetNorm = acoustics::AudioEngine::Convolve(dry, farNorm.audio);
+
+    const auto rawIrNear = MeasureAudio(nearRaw.audio);
+    const auto rawIrFar = MeasureAudio(farRaw.audio);
+    const auto normIrNear = MeasureAudio(nearNorm.audio);
+    const auto normIrFar = MeasureAudio(farNorm.audio);
+    const auto rawWetNear = MeasureAudio(nearWet.audio);
+    const auto rawWetFar = MeasureAudio(farWet.audio);
+    const auto normWetNear = MeasureAudio(nearWetNorm.audio);
+    const auto normWetFar = MeasureAudio(farWetNorm.audio);
+
+    std::cout << name << "\n";
+    PrintPair("  RIR peak, peak-normalize on ", normIrNear.peak, normIrFar.peak, true);
+    PrintPair("  RIR RMS,  peak-normalize on ", normIrNear.rms, normIrFar.rms, true);
+    PrintPair("  RIR peak, peak-normalize off", rawIrNear.peak, rawIrFar.peak, true);
+    PrintPair("  RIR RMS,  peak-normalize off", rawIrNear.rms, rawIrFar.rms, true);
+    PrintPair("  Wet peak, peak-normalize on ", normWetNear.peak, normWetFar.peak, true);
+    PrintPair("  Wet RMS,  peak-normalize on ", normWetNear.rms, normWetFar.rms, true);
+    PrintPair("  Wet peak, peak-normalize off", rawWetNear.peak, rawWetFar.peak, true);
+    PrintPair("  Wet RMS,  peak-normalize off", rawWetNear.rms, rawWetFar.rms, true);
+    std::cout << "  WavIo limiter gain, normalize on:  2m=" << normWetNear.limiterGain
+              << "  4m=" << normWetFar.limiterGain << "\n";
+    std::cout << "  WavIo limiter gain, normalize off: 2m=" << rawWetNear.limiterGain
+              << "  4m=" << rawWetFar.limiterGain << "\n";
+}
+
+bool TestDirectDistance(const acoustics::Receiver& listener, const acoustics::Settings& settings,
+                        const acoustics::Echogram& nearEcho, const acoustics::Echogram& farEcho,
+                        const acoustics::TraceStats& nearStats, const acoustics::TraceStats& farStats) {
+    const float nearT = DirectArrivalTime(2.0f, listener.earSpacing, settings.speedOfSound);
+    const float farT = DirectArrivalTime(4.0f, listener.earSpacing, settings.speedOfSound);
+    const auto nearEnergy = SplitEnergy(nearEcho, nearT - 0.0004f, nearT + 0.0012f);
+    const auto farEnergy = SplitEnergy(farEcho, farT - 0.0004f, farT + 0.0012f);
+    std::cout << "\nTest A — direct sound, maxBounces=0, " << settings.raysPerSource
+              << " rays, seed " << settings.randomSeed << "\n";
+    std::cout << std::scientific << std::setprecision(6);
+    PrintPair("  direct-window energy, all bands", nearEnergy.direct, farEnergy.direct, false);
+    PrintPair("  direct-window energy, 1 kHz   ", nearEnergy.directBand, farEnergy.directBand, false);
+    PrintPair("  echogram energy, all bands    ", nearEnergy.total, farEnergy.total, false);
+    std::cout << std::fixed << std::setprecision(4);
+    std::cout << "  ear hits 2m=" << nearStats.earHits << "  4m=" << farStats.earHits << "\n";
+
+    const double level = Decibels(farEnergy.directBand, nearEnergy.directBand);
+    const bool windowHoldsDirect =
+        nearEnergy.direct > 0.98 * nearEnergy.total && farEnergy.direct > 0.98 * farEnergy.total;
+    const bool inverseSquare = std::abs(level + 6.0206) <= 0.5;
+    return Report(windowHoldsDirect, "A direct-window contains the direct arrival") &&
+           Report(inverseSquare, "A doubling distance lowers direct-window energy by about 6 dB");
+}
+
+bool TestReverberantDistance(const acoustics::Receiver& listener,
+                             const acoustics::Echogram& nearEcho, const acoustics::Echogram& farEcho,
+                             const acoustics::Settings& settings) {
+    const float nearT = DirectArrivalTime(2.0f, listener.earSpacing, settings.speedOfSound);
+    const float farT = DirectArrivalTime(4.0f, listener.earSpacing, settings.speedOfSound);
+    const auto nearEnergy = SplitEnergy(nearEcho, nearT - 0.0004f, nearT + 0.0012f);
+    const auto farEnergy = SplitEnergy(farEcho, farT - 0.0004f, farT + 0.0012f);
+    const double nearReflected = nearEnergy.total - nearEnergy.direct;
+    const double farReflected = farEnergy.total - farEnergy.direct;
+    std::cout << "\nTest B — Uniform02, maxBounces=50, " << settings.raysPerSource << " rays, seed "
+              << settings.randomSeed << "\n";
+    std::cout << std::scientific << std::setprecision(6);
+    PrintPair("  total energy                  ", nearEnergy.total, farEnergy.total, false);
+    PrintPair("  direct-window energy          ", nearEnergy.direct, farEnergy.direct, false);
+    PrintPair("  reflected energy              ", nearReflected, farReflected, false);
+    std::cout << std::fixed << std::setprecision(4);
+    if (nearEnergy.direct > 0.0) {
+        std::cout << "  reflected/direct 2m=" << (nearReflected / nearEnergy.direct)
+                  << "  4m=" << (farEnergy.direct > 0.0 ? farReflected / farEnergy.direct : 0.0) << "\n";
+    }
+
+    const double totalDb = Decibels(farEnergy.total, nearEnergy.total);
+    const bool energyPresent = nearEnergy.total > 0.0 && farEnergy.total > 0.0 &&
+                               nearReflected > 0.0 && farReflected > 0.0;
+    const bool reverbDominates = nearReflected > nearEnergy.direct && farReflected > farEnergy.direct;
+    // Free-field decay would be about -6 dB. The room is past its critical distance.
+    const bool notFreeField = totalDb > -4.0;
+    return Report(energyPresent, "B direct and reflected energy are present at 2 m and 4 m") &&
+           Report(reverbDominates, "B reflected energy exceeds the direct window") &&
+           Report(notFreeField, "B total energy does not fall by a free-field 6 dB");
+}
+
+bool TestSingleBounceAbsorption() {
+    AcousticMaterialLibrary materials;
+    const auto hard = materials.RegisterMaterial(
+        AcousticMaterial("HardMirror", OctaveBands(0.0f), 0.0f));
+    const auto half = materials.RegisterMaterial(
+        AcousticMaterial("HalfAbsorb", OctaveBands(0.5f), 0.0f));
+
+    AcousticSceneGeometry hardRoom;
+    hardRoom.AddShoeboxRoom(kShoeboxDimensions, hard, hard, hard, kShoeboxCenter);
+    AcousticSceneGeometry halfRoom;
+    halfRoom.AddShoeboxRoom(kShoeboxDimensions, half, half, half, kShoeboxCenter);
+    BVH hardBvh;
+    hardBvh.Build(hardRoom);
+    BVH halfBvh;
+    halfBvh.Build(halfRoom);
+    const acoustics::Simulator hardSim(hardBvh, materials);
+    const acoustics::Simulator halfSim(halfBvh, materials);
+
+    acoustics::Receiver listener;
+    listener.headCenter = kListenerPosition;
+    listener.headShadow = false;
+    acoustics::Settings settings;
+    settings.maxDuration = 0.08f;
+    settings.maxBounces = 1;
+    settings.raysPerSource = 200'000;
+    settings.airAbsorption = OctaveBands::Zero();
+    settings.randomSeed = 42;
+
+    const auto hardEcho = Trace(hardSim, listener, 2.0f, settings, 1.0f);
+    const auto halfEcho = Trace(halfSim, listener, 2.0f, settings, 1.0f);
+    const float arrival = DirectArrivalTime(2.0f, listener.earSpacing, settings.speedOfSound);
+    const auto hardEnergy = SplitEnergy(hardEcho, arrival - 0.0004f, arrival + 0.0012f);
+    const auto halfEnergy = SplitEnergy(halfEcho, arrival - 0.0004f, arrival + 0.0012f);
+    const double hardReflected = hardEnergy.total - hardEnergy.direct;
+    const double halfReflected = halfEnergy.total - halfEnergy.direct;
+    const double ratio = halfReflected / hardReflected;
+
+    std::cout << "\nTest C — one bounce, alpha 0 vs alpha 0.5, scattering 0\n";
+    std::cout << std::scientific << std::setprecision(6);
+    std::cout << "  direct energy  alpha0=" << hardEnergy.direct << "  alpha0.5=" << halfEnergy.direct << "\n";
+    std::cout << "  reflected energy alpha0=" << hardReflected << "  alpha0.5=" << halfReflected
+              << "  ratio=" << ratio << "\n";
+    std::cout << std::fixed << std::setprecision(4);
+
+    const bool directUnchanged = hardEnergy.direct > 0.0 &&
+                                 std::abs(halfEnergy.direct - hardEnergy.direct) <= 1e-4 * hardEnergy.direct;
+    const bool reflectedScaled = hardReflected > 0.0 && std::abs(ratio - 0.5) <= 0.01;
+    return Report(directUnchanged, "C direct sound ignores the wall absorption") &&
+           Report(reflectedScaled, "C one bounce scales reflected energy by (1 - alpha)");
+}
+
+bool WavPreservesRatio(const acoustics::StereoAudio& nearAudio, const acoustics::StereoAudio& farAudio,
+                       const std::filesystem::path& directory) {
+    const auto nearPath = directory / "loudness-near.wav";
+    const auto farPath = directory / "loudness-far.wav";
+    const auto nearWrite = acoustics::AudioEngine::WriteStereoWav(nearPath, nearAudio);
+    const auto farWrite = acoustics::AudioEngine::WriteStereoWav(farPath, farAudio);
+    const auto nearRead = acoustics::AudioEngine::ReadWav(nearPath);
+    const auto farRead = acoustics::AudioEngine::ReadWav(farPath);
+    if (!nearWrite.ok || !farWrite.ok || !nearRead.ok || !farRead.ok) return false;
+
+    const auto peakOf = [](const acoustics::WavData& wav) {
+        float peak = 0.0f;
+        for (float sample : wav.interleaved) peak = std::max(peak, std::abs(sample));
+        return peak;
+    };
+    const float nearPeak = PeakAbs(nearAudio);
+    const float farPeak = PeakAbs(farAudio);
+    const float nearReadPeak = peakOf(nearRead);
+    const float farReadPeak = peakOf(farRead);
+    const double before = AmplitudeDecibels(farPeak, nearPeak);
+    const double after = AmplitudeDecibels(farReadPeak, nearReadPeak);
+    std::cout << "  WAV peak dB before write=" << before << "  after PCM16 read=" << after << "\n";
+    std::cout << "  write messages: near=\"" << nearWrite.message << "\" far=\"" << farWrite.message << "\"\n";
+    const bool limiterIdle = nearPeak <= kSafePeak && farPeak <= kSafePeak &&
+                             std::abs(nearReadPeak - nearPeak) < 0.002f &&
+                             std::abs(farReadPeak - farPeak) < 0.002f;
+    return limiterIdle && std::abs(after - before) <= 0.25;
+}
+
+bool TestPlayback(const acoustics::Echogram& nearDirect, const acoustics::Echogram& farDirect,
+                  const acoustics::Echogram& nearRoom, const acoustics::Echogram& farRoom) {
+    const auto dry = MakeDrySignal();
+    std::cout << "\nMeasured audio (same dry 1 kHz burst, same seeds)\n";
+    PrintAudioPolicy("Direct, 4e6 rays:", nearDirect, farDirect, dry);
+    PrintAudioPolicy("Uniform02 room:", nearRoom, farRoom, dry);
+
+    // Same direct echogram with one quarter of the energy. This is the 2 m -> 4 m
+    // energy ratio on an identical arrival, so the noise and filters do not move.
+    auto quarter = nearDirect;
+    for (OctaveBands& bin : quarter.left) bin *= 0.25f;
+    for (OctaveBands& bin : quarter.right) bin *= 0.25f;
+
+    acoustics::AudioEngine::SynthOptions playback;
+    playback.peakNormalize = false;
+    const auto fullIr = acoustics::AudioEngine::SynthesizeImpulseResponse(nearDirect, playback);
+    const auto quarterIr = acoustics::AudioEngine::SynthesizeImpulseResponse(quarter, playback);
+    const auto fullWet = acoustics::AudioEngine::Convolve(dry, fullIr.audio);
+    const auto quarterWet = acoustics::AudioEngine::Convolve(dry, quarterIr.audio);
+    const auto fullLevels = MeasureAudio(fullWet.audio);
+    const auto quarterLevels = MeasureAudio(quarterWet.audio);
+    const double wetDb = AmplitudeDecibels(quarterLevels.rms, fullLevels.rms);
+    const bool scaled = fullIr.ok && quarterIr.ok && fullWet.ok && quarterWet.ok &&
+                        fullLevels.limiterGain == 1.0f && quarterLevels.limiterGain == 1.0f &&
+                        std::abs(wetDb + 6.0206) <= 0.05;
+
+    acoustics::AudioEngine::SynthOptions normalized;
+    const auto fullNorm = acoustics::AudioEngine::SynthesizeImpulseResponse(nearDirect, normalized);
+    const auto quarterNorm = acoustics::AudioEngine::SynthesizeImpulseResponse(quarter, normalized);
+    const double normPeakDb = AmplitudeDecibels(PeakAbs(quarterNorm.audio), PeakAbs(fullNorm.audio));
+    const bool oldPathFlattens = fullNorm.ok && quarterNorm.ok && std::abs(normPeakDb) <= 0.05;
+
+    const auto roomNear = acoustics::AudioEngine::SynthesizeImpulseResponse(nearRoom, playback);
+    const auto roomFar = acoustics::AudioEngine::SynthesizeImpulseResponse(farRoom, playback);
+    const auto roomNearWet = acoustics::AudioEngine::Convolve(dry, roomNear.audio);
+    const auto roomFarWet = acoustics::AudioEngine::Convolve(dry, roomFar.audio);
+    const auto roomNearLevels = MeasureAudio(roomNearWet.audio);
+    const auto roomFarLevels = MeasureAudio(roomFarWet.audio);
+    const bool roomLimiterIdle = roomNearWet.ok && roomFarWet.ok &&
+                                 roomNearLevels.limiterGain == 1.0f && roomFarLevels.limiterGain == 1.0f;
+
+    const auto realNear = acoustics::AudioEngine::SynthesizeImpulseResponse(nearDirect, normalized);
+    const auto realFar = acoustics::AudioEngine::SynthesizeImpulseResponse(farDirect, normalized);
+    const double realNormPeakDb = AmplitudeDecibels(PeakAbs(realFar.audio), PeakAbs(realNear.audio));
+    const bool realPeaksEquated = realNear.ok && realFar.ok && std::abs(realNormPeakDb) <= 0.05;
+
+    std::filesystem::path directory;
+    try {
+        directory = std::filesystem::temp_directory_path() / "geometric-acoustics-loudness";
+        std::filesystem::create_directories(directory);
+    } catch (const std::exception&) {
+        return Report(false, "D could not create a temporary WAV directory");
+    }
+    const bool wav = WavPreservesRatio(fullWet.audio, quarterWet.audio, directory);
+
+    std::cout << std::fixed << std::setprecision(4);
+    std::cout << "  quarter-energy wet RMS dB=" << wetDb
+              << "  normalized quarter-energy peak dB=" << normPeakDb
+              << "  normalized real direct peak dB=" << realNormPeakDb << "\n";
+    return Report(scaled, "D quarter energy keeps a 6 dB convolution drop and the limiter stays idle") &&
+           Report(oldPathFlattens, "D default peak normalization equates a 6 dB energy difference") &&
+           Report(realPeaksEquated, "D default peak normalization equates the real 2 m and 4 m direct peaks") &&
+           Report(roomLimiterIdle, "D reverberant 2 m and 4 m convolution stays under the limiter") &&
+           Report(wav, "D WAV round-trip keeps the quarter-energy peak ratio");
+}
+
+bool TestLoudness() {
+    const auto& materials = AcousticMaterialLibrary::Instance();
+    const auto wall = materials.GetMaterialId("Uniform02");
+    AcousticSceneGeometry room;
+    room.AddShoeboxRoom(kShoeboxDimensions, wall, wall, wall, kShoeboxCenter);
+    BVH bvh;
+    bvh.Build(room);
+    const acoustics::Simulator simulator(bvh, materials);
+    const auto dry = MakeDrySignal();
+
+    acoustics::Receiver sceneListener;
+    sceneListener.headCenter = kListenerPosition;
+    sceneListener.headShadow = true;
+    acoustics::Settings sceneSettings;
+    sceneSettings.raysPerSource = 50'000;
+    sceneSettings.maxBounces = 50;
+    sceneSettings.maxDuration = 2.0f;
+    sceneSettings.randomSeed = 42;
+    sceneSettings.SetAirConditions({});
+    std::cout << "\nBaseline before the playback change, shoebox Uniform02, power 3, "
+              << "50000 rays, seed 42, head shadow, air 20 C / 50 %\n";
+    std::cout << "  speed of sound " << sceneSettings.speedOfSound << " m/s\n";
+    const auto sceneNear = Trace(simulator, sceneListener, 2.0f, sceneSettings, 3.0f);
+    const auto sceneFar = Trace(simulator, sceneListener, 4.0f, sceneSettings, 3.0f);
+    const float sceneNearT = DirectArrivalTime(2.0f, sceneListener.earSpacing, sceneSettings.speedOfSound);
+    const float sceneFarT = DirectArrivalTime(4.0f, sceneListener.earSpacing, sceneSettings.speedOfSound);
+    const auto sceneNearEnergy = SplitEnergy(sceneNear, sceneNearT - 0.0004f, sceneNearT + 0.0012f);
+    const auto sceneFarEnergy = SplitEnergy(sceneFar, sceneFarT - 0.0004f, sceneFarT + 0.0012f);
+    std::cout << std::scientific << std::setprecision(6);
+    PrintPair("  total energy        ", sceneNearEnergy.total, sceneFarEnergy.total, false);
+    PrintPair("  direct-window energy", sceneNearEnergy.direct, sceneFarEnergy.direct, false);
+    PrintPair("  reflected energy    ", sceneNearEnergy.total - sceneNearEnergy.direct,
+              sceneFarEnergy.total - sceneFarEnergy.direct, false);
+    std::cout << std::fixed << std::setprecision(4);
+    PrintAudioPolicy("Baseline playback policies:", sceneNear, sceneFar, dry);
+
+    acoustics::Receiver listener;
+    listener.headCenter = kListenerPosition;
+    listener.headShadow = false;
+    acoustics::Settings directSettings;
+    directSettings.maxDuration = 0.05f;
+    directSettings.maxBounces = 0;
+    directSettings.raysPerSource = 4'000'000;
+    directSettings.airAbsorption = OctaveBands::Zero();
+    directSettings.randomSeed = 42;
+    acoustics::TraceStats nearDirectStats;
+    acoustics::TraceStats farDirectStats;
+    const auto nearDirect = Trace(simulator, listener, 2.0f, directSettings, 1.0f, &nearDirectStats);
+    const auto farDirect = Trace(simulator, listener, 4.0f, directSettings, 1.0f, &farDirectStats);
+    const bool direct = TestDirectDistance(listener, directSettings, nearDirect, farDirect,
+                                           nearDirectStats, farDirectStats);
+
+    acoustics::Settings roomSettings;
+    roomSettings.raysPerSource = 100'000;
+    roomSettings.maxBounces = 50;
+    roomSettings.maxDuration = 2.0f;
+    roomSettings.airAbsorption = OctaveBands::Zero();
+    roomSettings.randomSeed = 42;
+    const auto nearRoom = Trace(simulator, listener, 2.0f, roomSettings, 1.0f);
+    const auto farRoom = Trace(simulator, listener, 4.0f, roomSettings, 1.0f);
+    const bool reverberant = TestReverberantDistance(listener, nearRoom, farRoom, roomSettings);
+    const bool playback = TestPlayback(nearDirect, farDirect, nearRoom, farRoom);
+    return direct && reverberant && playback;
+}
+
 } // namespace
 
 int main() {
@@ -380,5 +829,7 @@ int main() {
     const bool directSound = TestDirectSound();
     const bool complexGeometry = TestComplexGeometry();
     const bool reverberation = TestShoeboxReverberation();
-    return directSound && complexGeometry && reverberation ? 0 : 1;
+    const bool loudness = TestLoudness();
+    const bool absorption = TestSingleBounceAbsorption();
+    return directSound && complexGeometry && reverberation && loudness && absorption ? 0 : 1;
 }

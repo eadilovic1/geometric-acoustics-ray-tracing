@@ -1661,7 +1661,14 @@ void RendererUI::PlayAcousticResponse(const acoustics::MonoAudio &dry) {
         m_acousticAudioMessage = "No rays reached either ear. Increase the ray count or adjust the listener.";
         return;
     }
-    const auto impulse = acoustics::AudioEngine::SynthesizeImpulseResponse(m_acousticRun->echogram);
+    // The default synthesizer scales every impulse to a peak of 0.99. That gain
+    // depends on the current echogram, so a farther listener is boosted to the
+    // same peak as a nearer one. Playback keeps the simulator's relative level.
+    // No extra gain is applied here: the same factor (1) is used at every position,
+    // and WavIo still limits only a buffer that actually exceeds 0.99.
+    acoustics::AudioEngine::SynthOptions options;
+    options.peakNormalize = false;
+    const auto impulse = acoustics::AudioEngine::SynthesizeImpulseResponse(m_acousticRun->echogram, options);
     if (!impulse.ok) {
         m_acousticAudioMessage = impulse.message;
         return;
