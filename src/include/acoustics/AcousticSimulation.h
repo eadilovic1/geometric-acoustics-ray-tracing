@@ -219,6 +219,10 @@ struct TraceStats {
 
     uint64_t earHits = 0;
 
+    uint64_t leftEarHits = 0;
+
+    uint64_t rightEarHits = 0;
+
     uint64_t headOcclusions = 0;
 
     uint64_t escaped = 0;

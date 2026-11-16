@@ -194,6 +194,11 @@ void CheckReceiver(
         }
 
         ++stats.earHits;
+        if (isLeft) {
+            ++stats.leftEarHits;
+        } else {
+            ++stats.rightEarHits;
+        }
 
         // Sredina tetive duž segmenta
         const float midT = (nearT + farT) * 0.5f;
