@@ -1983,8 +1983,11 @@ void RendererUI::DrawTabAcoustics(Scene &scene, const FrameSubmission &frame) {
         ImGui::Indent();
         ImGui::PushStyleColor(ImGuiCol_Text, Pal::TextMid);
         ImGui::Text("Triangles: %s", FormatCompact(run.triangleCount).c_str());
-        ImGui::Text("Rays: %s    Ear hits: %s",
-                    FormatCompact(run.stats.emitted).c_str(), FormatCompact(run.stats.earHits).c_str());
+        ImGui::Text("Rays: %s    Ear hits: %s (L: %s, R: %s)",
+                    FormatCompact(run.stats.emitted).c_str(),
+                    FormatCompact(run.stats.earHits).c_str(),
+                    FormatCompact(run.stats.leftEarHits).c_str(),
+                    FormatCompact(run.stats.rightEarHits).c_str());
         ImGui::Text("Segments: %s", FormatCompact(run.stats.segments).c_str());
         ImGui::Text("Echogram: %s bins at %.0f Hz",
                     FormatCompact(run.echogram.BinCount()).c_str(), run.echogram.sampleRate);
