@@ -99,8 +99,8 @@ struct AcousticHit {
     const glm::vec3 tNear = glm::min(t0, t1);
     const glm::vec3 tFar  = glm::max(t0, t1);
 
-    const float enter = std::max({ tMinLimit, tNear.x, tNear.y, tNear.z });
-    const float exit  = std::min({ tMaxLimit, tFar.x,  tFar.y,  tFar.z  });
+    const float enter = std::max(tMinLimit, std::max(tNear.x, std::max(tNear.y, tNear.z)));
+    const float exit  = std::min(tMaxLimit, std::min(tFar.x, std::min(tFar.y, tFar.z)));
 
     outTNear = enter;
     return enter <= exit;

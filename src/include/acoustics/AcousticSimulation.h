@@ -203,6 +203,9 @@ struct Settings {
 
     /// Set sound speed and octave-band energy attenuation at 101.325 kPa.
     void SetAirConditions(const AirConditions& air);
+
+    // Omogucava posebno racunanje direktnog zvuka.
+bool enableDirectSound = false;
 };
 
 

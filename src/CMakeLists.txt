@@ -49,9 +49,12 @@ add_library(${PROJECT_NAME} STATIC
         opengl/core/Mesh.cpp
         opengl/acoustics/AcousticMaterial.cpp
         opengl/acoustics/AcousticGeometry.cpp
+        
         opengl/acoustics/BVH.cpp
         opengl/acoustics/AcousticSimulation.cpp
+        opengl/acoustics/DirectSound.cpp
         opengl/acoustics/RoomMetrics.cpp
+
         opengl/acoustics/BandpassFilter.cpp
         opengl/acoustics/ImpulseResponse.cpp
         opengl/acoustics/AudioConvolution.cpp
@@ -138,3 +141,10 @@ add_executable(AuralizationDemo
     opengl/acoustics/AuralizationDemo.cpp
 )
 target_link_libraries(AuralizationDemo PRIVATE ${PROJECT_NAME})
+
+# Headless timing harness for the existing serial acoustic path.
+# Links RendererLib; it does not duplicate Simulator::Run or the BVH.
+add_executable(AcousticsSerialBench
+    opengl/acoustics/AcousticsSerialBench.cpp
+)
+target_link_libraries(AcousticsSerialBench PRIVATE ${PROJECT_NAME})

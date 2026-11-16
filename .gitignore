@@ -9,3 +9,4 @@ compile_commands.json
 /test-app/imgui.ini
 .VSCodeCounter/
 /assets/models/fbx/bistro_v5_2/
+build-vs2022/
