@@ -49,9 +49,12 @@ add_library(${PROJECT_NAME} STATIC
         opengl/core/Mesh.cpp
         opengl/acoustics/AcousticMaterial.cpp
         opengl/acoustics/AcousticGeometry.cpp
+        
         opengl/acoustics/BVH.cpp
         opengl/acoustics/AcousticSimulation.cpp
+        opengl/acoustics/DirectSound.cpp
         opengl/acoustics/RoomMetrics.cpp
+
         opengl/acoustics/BandpassFilter.cpp
         opengl/acoustics/ImpulseResponse.cpp
         opengl/acoustics/AudioConvolution.cpp

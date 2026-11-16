@@ -112,7 +112,13 @@ private:
     };
 
     const Scene *m_acousticScene = nullptr;
-    acoustics::Settings m_acousticSettings;
+    
+acoustics::Settings m_acousticSettings = [] {
+    acoustics::Settings settings;
+    settings.enableDirectSound = true;
+    return settings;
+}();
+
     acoustics::AirConditions m_acousticAir;
     acoustics::Receiver m_acousticReceiver;
     std::optional<AcousticRun> m_acousticRun;

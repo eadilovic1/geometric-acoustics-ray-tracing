@@ -1,6 +1,7 @@
 #include "acoustics/AcousticSimulation.h"
 #include "core/Camera.h"
 #include "scene/LightEnvironment.h"
+#include "acoustics/DirectSound.h"
 
 #include <glm/gtc/constants.hpp>
 
@@ -537,6 +538,17 @@ TraceStats Simulator::Run(
         if (initialMaxEnergy <= 0.0f) {
             continue; // Ugašen ili izvor nulte snage
         }
+        // Deterministicki direktni zvuk za oba uha.
+// Poziva se samo jednom po izvoru, a ne jednom po zraci.
+if (cfg.enableDirectSound) {
+    DepositDirectSound(
+        source,
+        receiver,
+        bvh_,
+        cfg,
+        echogram
+    );
+}
 
         for (uint32_t i = 0; i < cfg.raysPerSource; ++i) {
             const bool capturePath = capturedPaths < debugPathCount && stats.emitted == nextDebugRay;
@@ -592,8 +604,15 @@ TraceStats Simulator::Run(
 
                 ++stats.segments;
 
-                // Provjera presjeka sa binauralnim prijemnikom (uši i glava)
-                CheckReceiver(ray, segment, receiver, cfg, echogram, stats);
+                
+// Kada je deterministicki direktni zvuk ukljucen,
+// Monte Carlo prijemnik obradjuje samo reflektovane zrake.
+// Time izbjegavamo dvostruko racunanje direktnog zvuka.
+if (!cfg.enableDirectSound ||
+    source.pattern != Source::Pattern::Omni ||
+    ray.bounceCount > 0) {
+    CheckReceiver(ray, segment, receiver, cfg, echogram, stats);
+}
 
                 // Napredovanje zrake duž segmenta
                 ray.Advance(segment);

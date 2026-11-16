@@ -119,6 +119,66 @@ bool TestShoeboxReverberation() {
     return inRange && converged;
 }
 
+bool TestDeterministicDirectSound() {
+    using namespace acoustics;
+
+    AcousticMaterialLibrary materials;
+    AcousticSceneGeometry room;
+
+    BVH bvh;
+    bvh.Build(room);
+
+    Simulator simulator(bvh, materials);
+
+    Receiver listener;
+    listener.headCenter = {0.0f, 1.5f, 0.0f};
+
+    Source source;
+    source.pattern = Source::Pattern::Omni;
+    source.position = {2.0f, 1.5f, 0.0f};
+
+    Settings settings;
+    settings.enableDirectSound = true;
+    settings.raysPerSource = 100;
+    settings.maxBounces = 0;
+    settings.maxDuration = 0.1f;
+    settings.airAbsorption = OctaveBands::Zero();
+
+    Echogram echogram(settings.maxDuration);
+
+    simulator.Run({source}, listener, echogram, settings);
+
+    double leftEnergy = 0.0;
+    double rightEnergy = 0.0;
+
+    for (const auto& bin : echogram.left) {
+        leftEnergy += bin[3];
+    }
+
+    for (const auto& bin : echogram.right) {
+        rightEnergy += bin[3];
+    }
+
+    const bool bothEars =
+        leftEnergy > 0.0 &&
+        rightEnergy > 0.0;
+
+    const bool rightLouder =
+        rightEnergy > leftEnergy;
+
+    std::cout << std::scientific << std::setprecision(9)
+          << "Direct L = " << leftEnergy
+          << ", R = " << rightEnergy << '\n'
+          << std::defaultfloat;
+
+    return Report(
+        bothEars && rightLouder,
+        "Deterministic direct sound: both ears and ILD"
+    );
+}
+
+
+
 struct DirectArrival {
     double energy = 0.0;
     double centerSample = 0.0;
@@ -147,6 +207,140 @@ bool MatchesDirectArrival(const std::vector<OctaveBands>& bins, const DirectArri
            std::abs(arrival.centerSample - expectedSample) <= 1.0 &&
            bins[expectedBin][kBand1kHz] >= 0.98f * arrival.peakEnergy;
 }
+bool TestDirectSoundFinalValidation() {
+    using namespace acoustics;
+
+    AcousticMaterialLibrary materials;
+    AcousticSceneGeometry emptyScene;
+
+    BVH emptyBVH;
+    emptyBVH.Build(emptyScene);
+
+    Simulator simulator(emptyBVH, materials);
+
+    Receiver listener;
+    listener.headCenter = {0.0f, 1.5f, 0.0f};
+
+    Source source;
+    source.pattern = Source::Pattern::Omni;
+    source.position = {2.0f, 1.5f, 0.0f};
+
+    Settings settings;
+    settings.enableDirectSound = true;
+    settings.raysPerSource = 100;
+    settings.maxBounces = 0;
+    settings.maxDuration = 0.1f;
+    settings.airAbsorption = OctaveBands::Zero();
+
+    Echogram direct(settings.maxDuration);
+    simulator.Run({source}, listener, direct, settings);
+
+    // TEST 1: Vrijeme dolaska direktnog zvuka (ITD)
+    const auto left = MeasureArrival(direct.left);
+    const auto right = MeasureArrival(direct.right);
+
+    const double expectedLeft =
+        glm::length(listener.LeftEar() - source.position)
+        * direct.sampleRate / settings.speedOfSound;
+
+    const double expectedRight =
+        glm::length(listener.RightEar() - source.position)
+        * direct.sampleRate / settings.speedOfSound;
+
+    const double measuredITD =
+        left.centerSample - right.centerSample;
+
+    const double expectedITD =
+        expectedLeft - expectedRight;
+
+    const bool itdPassed =
+        left.energy > 0.0 &&
+        right.energy > 0.0 &&
+        measuredITD > 0.0 &&
+        std::abs(measuredITD - expectedITD) <= 1.0;
+
+    std::cout << "Direct ITD measured = "
+              << measuredITD
+              << ", expected = "
+              << expectedITD << " samples\n";
+
+    Report(itdPassed,
+           "Direct sound: right ear receives sound earlier");
+
+    // TEST 2: Energija sa i bez zasjenjenja glavom
+    Receiver noShadowListener = listener;
+    noShadowListener.headShadow = false;
+
+    Echogram noShadow(settings.maxDuration);
+
+    simulator.Run(
+        {source},
+        noShadowListener,
+        noShadow,
+        settings
+    );
+
+    const auto leftNoShadow = MeasureArrival(noShadow.left);
+    const auto rightNoShadow = MeasureArrival(noShadow.right);
+
+    const bool shadowPassed =
+        left.energy < leftNoShadow.energy &&
+        right.energy > 0.0 &&
+        leftNoShadow.energy > 0.0 &&
+        rightNoShadow.energy > 0.0;
+
+    std::cout << "Far ear with shadow = "
+              << left.energy
+              << ", without shadow = "
+              << leftNoShadow.energy << '\n';
+
+    Report(shadowPassed,
+           "Direct sound: head shadow attenuates far ear");
+
+    // TEST 3: Poredjenje sa Monte Carlo modelom
+    Settings mcSettings = settings;
+    mcSettings.enableDirectSound = false;
+    mcSettings.raysPerSource = 1000000;
+
+    Echogram monteCarlo(settings.maxDuration);
+
+    simulator.Run(
+        {source},
+        listener,
+        monteCarlo,
+        mcSettings
+    );
+
+    const auto mcLeft = MeasureArrival(monteCarlo.left);
+    const auto mcRight = MeasureArrival(monteCarlo.right);
+
+    const double directEnergy =
+        left.energy + right.energy;
+
+    const double mcEnergy =
+        mcLeft.energy + mcRight.energy;
+
+    const double energyRatio =
+        mcEnergy > 0.0 ? directEnergy / mcEnergy : 0.0;
+
+    const bool comparisonValid =
+        directEnergy > 0.0 &&
+        mcEnergy > 0.0 &&
+        std::isfinite(energyRatio);
+
+    std::cout << "Deterministic energy = "
+              << directEnergy
+              << ", Monte Carlo energy = "
+              << mcEnergy
+              << ", ratio = "
+              << energyRatio << '\n';
+
+    Report(comparisonValid,
+           "Direct sound: energy comparison available");
+
+    return itdPassed && shadowPassed && comparisonValid;
+}
+
 
 bool TestFrontalSource(const acoustics::Simulator& simulator, const acoustics::Receiver& listener,
                        acoustics::Settings settings) {
@@ -822,14 +1016,123 @@ bool TestLoudness() {
     return direct && reverberant && playback;
 }
 
+bool TestDirectSoundObstacle() {
+    using namespace acoustics;
+
+    AcousticMaterialLibrary materials;
+
+    Receiver listener;
+    listener.headCenter = {0.0f, 1.5f, 0.0f};
+    listener.headShadow = false;
+
+    Source source;
+    source.pattern = Source::Pattern::Omni;
+    source.position = {2.0f, 1.5f, 0.0f};
+
+    Settings settings;
+    settings.enableDirectSound = true;
+    settings.raysPerSource = 100;
+    settings.maxBounces = 0;
+    settings.maxDuration = 0.1f;
+    settings.airAbsorption = OctaveBands::Zero();
+
+    // Slucaj 1: nema prepreke.
+    AcousticSceneGeometry emptyScene;
+    BVH emptyBVH;
+    emptyBVH.Build(emptyScene);
+
+    Simulator emptySimulator(emptyBVH, materials);
+    Echogram clearEcho(settings.maxDuration);
+
+    emptySimulator.Run(
+        {source}, listener, clearEcho, settings
+    );
+
+    const double clearEnergy =
+        BandEnergy(clearEcho.left, kBand1kHz) +
+        BandEnergy(clearEcho.right, kBand1kHz);
+
+    // Slucaj 2: zid na x = 1, izmedju izvora i oba uha.
+    AcousticSceneGeometry blockedScene;
+
+    blockedScene.AddTriangle(
+        {1.0f, 0.0f, -1.0f},
+        {1.0f, 3.0f, -1.0f},
+        {1.0f, 3.0f,  1.0f},
+        0
+    );
+
+    blockedScene.AddTriangle(
+        {1.0f, 0.0f, -1.0f},
+        {1.0f, 3.0f,  1.0f},
+        {1.0f, 0.0f,  1.0f},
+        0
+    );
+
+    blockedScene.Finalize();
+
+    BVH blockedBVH;
+    blockedBVH.Build(blockedScene);
+
+    Simulator blockedSimulator(blockedBVH, materials);
+    Echogram blockedEcho(settings.maxDuration);
+
+    blockedSimulator.Run(
+        {source}, listener, blockedEcho, settings
+    );
+
+    const double blockedEnergy =
+        BandEnergy(blockedEcho.left, kBand1kHz) +
+        BandEnergy(blockedEcho.right, kBand1kHz);
+
+    std::cout << std::scientific << std::setprecision(9)
+              << "Direct sound without wall = " << clearEnergy
+              << "\nDirect sound with wall = " << blockedEnergy
+              << '\n'
+              << std::defaultfloat;
+
+    const bool passed =
+        clearEnergy > 0.0 &&
+        std::abs(blockedEnergy) < 1e-12;
+
+    return Report(
+        passed,
+        "Deterministic direct sound: wall blocks both ears"
+    );
+}
+
 } // namespace
+
 
 int main() {
     std::cout << std::fixed << std::setprecision(4);
+
     const bool directSound = TestDirectSound();
     const bool complexGeometry = TestComplexGeometry();
     const bool reverberation = TestShoeboxReverberation();
     const bool loudness = TestLoudness();
     const bool absorption = TestSingleBounceAbsorption();
-    return directSound && complexGeometry && reverberation && loudness && absorption ? 0 : 1;
+
+    const bool directSoundPassed = TestDeterministicDirectSound();
+    const bool finalDirectPassed = TestDirectSoundFinalValidation();
+    const bool obstaclePassed = TestDirectSoundObstacle();
+
+   
+const bool allPassed =
+    directSound &&
+    complexGeometry &&
+    reverberation &&
+    loudness &&
+    absorption &&
+    directSoundPassed &&
+    finalDirectPassed &&
+    obstaclePassed;
+
+
+    std::cout << "\n====================================\n";
+    std::cout << (allPassed ? "ALL TESTS PASSED" : "SOME TESTS FAILED");
+    std::cout << "\n====================================\n";
+
+    return allPassed ? 0 : 1;
 }
+
